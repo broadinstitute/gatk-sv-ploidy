@@ -366,7 +366,7 @@ def test_plot_sample_ignores_aggregate_af_without_site_data(
         str(tmp_path),
     )
 
-    assert captured["nrows"] == 4
+    assert captured["nrows"] == 3
     assert any((tmp_path / "sample_plots").iterdir())
 
 
@@ -492,14 +492,14 @@ def test_plot_sample_with_variance_omits_filtered_panel_and_filtered_af_cnq(
     )
 
     fig = captured["fig"]
-    assert len(fig.axes) == 5
+    assert len(fig.axes) == 4
 
     ax_af = fig.axes[1]
     ax_cnq = fig.axes[2]
-    ax_binq = fig.axes[3]
+    ax_hist = fig.axes[3]
     assert ax_af.get_ylabel() == "Allele fraction"
     assert tuple(ax_cnq.get_ylim()) == pytest.approx((0.0, 105.0))
-    assert tuple(ax_binq.get_ylim()) == pytest.approx((0.0, 105.0))
+    assert ax_hist.get_xlabel() == "Sample overdispersion"
 
     af_point_counts = [
         len(collection.get_offsets())

@@ -339,7 +339,7 @@ def plot_sample_with_variance(
     min_het_alt: int = 3,
     detail_note: Optional[str] = None,
 ) -> None:
-    """Multi-panel plot: retained-bin depth + CN, optional AF scatter, CNQ, optional BINQ, sample-var histogram.
+    """Multi-panel plot: retained-bin depth + CN, optional AF scatter, CNQ, sample-var histogram.
 
     When *site_data* is provided (the ``.npz`` from preprocessing), each
     individual SNP allele fraction is drawn as a translucent dot, giving a
@@ -386,10 +386,6 @@ def plot_sample_with_variance(
             has_site_scatter = True
 
     has_af = has_site_scatter
-    has_binq = (
-        "binq_value" in sample_data.columns and
-        np.isfinite(sample_data["binq_value"].to_numpy(dtype=float)).any()
-    )
 
     obs = sample_data["observed_depth"].values
     has_cn_map = (
@@ -435,8 +431,6 @@ def plot_sample_with_variance(
         height_ratios.append(2)
     if has_cnq:
         height_ratios.append(1)
-    if has_binq:
-        height_ratios.append(1)
     if has_sample_var:
         height_ratios.append(1)
 
@@ -451,7 +445,6 @@ def plot_sample_with_variance(
     ax_depth = next(axis_iter)
     ax_af = next(axis_iter) if has_af else None
     ax_cn_prob = next(axis_iter) if has_cnq else None
-    ax_binq = next(axis_iter) if has_binq else None
     ax_hist = next(axis_iter) if has_sample_var else None
 
     title_parts = [name]
@@ -513,25 +506,6 @@ def plot_sample_with_variance(
         ax.set_xlim([x_min, x_max])
         ax.grid(True, axis="y", alpha=0.3)
 
-    if ax_binq is not None:
-        ax = ax_binq
-        binq = sample_data["binq_value"].to_numpy(dtype=float)
-        _draw_score_track(
-            ax,
-            x,
-            binq,
-            color="#7E57C2",
-        )
-        binq_label = "BINQ"
-        if "binq_field" in sample_data.columns:
-            field_series = sample_data["binq_field"].dropna().astype(str)
-            if not field_series.empty:
-                binq_label = field_series.iloc[0]
-        ax.set_ylabel(binq_label)
-        ax.set_ylim(_SCORE_TRACK_YLIM)
-        ax.set_xlim([x_min, x_max])
-        ax.grid(True, axis="y", alpha=0.3)
-
     # Sample overdispersion histogram (half height)
     if ax_hist is not None and svar is not None:
         ax = ax_hist
@@ -558,7 +532,7 @@ def plot_sample_with_variance(
 
     # Highlight aneuploid chromosomes on spatial panels
     spatial_axes = [
-        axis for axis in (ax_depth, ax_af, ax_cn_prob, ax_binq)
+        axis for axis in (ax_depth, ax_af, ax_cn_prob)
         if axis is not None
     ]
 

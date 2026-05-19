@@ -1118,6 +1118,11 @@ def _run_aneuploidy_plots(
             str(sid),
             {"baseline_ploidy_type": "DIPLOID", "autosomal_baseline_cn": 2},
         )
+        chromosome_plq_map = {
+            str(row["chromosome"]): float(row["plq"])
+            for _, row in sdf.iterrows()
+            if "plq" in row.index and pd.notna(row["plq"])
+        }
         plot_sample_with_variance(
             sdata, all_vars, output_dir,
             aneuploid_chrs=aneu_chrs,
@@ -1125,6 +1130,7 @@ def _run_aneuploidy_plots(
             autosomal_baseline_cn=int(metadata.get("autosomal_baseline_cn", 2)),
             site_data=site_data,
             sample_idx_map=sample_idx_map,
+            chromosome_plq_map=chromosome_plq_map,
             min_het_alt=min_het_alt,
         )
 
@@ -1156,16 +1162,23 @@ def _run_aneuploidy_plots(
         sdata = sample_groups.get(sid)
         if sdata is None:
             continue
+        sdf = df[df["sample"] == sid]
         metadata = baseline_metadata.get(
             str(sid),
             {"baseline_ploidy_type": "DIPLOID", "autosomal_baseline_cn": 2},
         )
+        chromosome_plq_map = {
+            str(row["chromosome"]): float(row["plq"])
+            for _, row in sdf.iterrows()
+            if "plq" in row.index and pd.notna(row["plq"])
+        }
         plot_sample_with_variance(
             sdata, all_vars, output_dir,
             baseline_ploidy_type=str(metadata.get("baseline_ploidy_type", "DIPLOID")),
             autosomal_baseline_cn=int(metadata.get("autosomal_baseline_cn", 2)),
             site_data=site_data,
             sample_idx_map=sample_idx_map,
+            chromosome_plq_map=chromosome_plq_map,
             min_het_alt=min_het_alt,
         )
 

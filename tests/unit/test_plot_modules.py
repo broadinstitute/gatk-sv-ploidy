@@ -458,17 +458,21 @@ def test_plot_sample_with_variance_omits_filtered_panel_and_filtered_af_cnq(
 ) -> None:
     sample_data = pd.DataFrame(
         {
-            "sample": ["S1", "S1"],
-            "chr": ["chr21", "chr18"],
-            "start": [200, 100],
-            "end": [300, 200],
-            "observed_depth": [2.0, 1.9],
-            "cn_map": [2, 2],
-            "cnq": [20.0, 40.0],
-            "binq_field": ["BINQ20", "BINQ20"],
-            "binq_value": [35.0, 5.0],
-            "sample_var": [0.09, 0.09],
-            "ignored_in_call": [False, True],
+            "sample": ["S1", "S1", "S1"],
+            "chr": ["chr21", "chr21", "chr18"],
+            "start": [100, 200, 100],
+            "end": [200, 300, 200],
+            "observed_depth": [2.0, 2.1, 1.9],
+            "cn_map": [2, 2, 2],
+            "cnq": [20.0, 60.0, 40.0],
+            "cn_prob_0": [0.0, 0.0, 0.0],
+            "cn_prob_1": [0.05, 0.02, 0.1],
+            "cn_prob_2": [0.90, 0.97, 0.85],
+            "cn_prob_3": [0.05, 0.01, 0.05],
+            "cn_prob_4": [0.0, 0.0, 0.0],
+            "cn_prob_5": [0.0, 0.0, 0.0],
+            "sample_var": [0.09, 0.09, 0.09],
+            "ignored_in_call": [False, False, True],
         }
     )
     site_data = dict(tiny_site_data)
@@ -489,6 +493,7 @@ def test_plot_sample_with_variance_omits_filtered_panel_and_filtered_af_cnq(
         str(tmp_path),
         site_data=site_data,
         sample_idx_map={"S1": 0, "S2": 1},
+        chromosome_plq_map={"chr21": 55.0, "chr18": 12.0},
     )
 
     fig = captured["fig"]
@@ -498,7 +503,7 @@ def test_plot_sample_with_variance_omits_filtered_panel_and_filtered_af_cnq(
     ax_cnq = fig.axes[2]
     ax_hist = fig.axes[3]
     assert ax_af.get_ylabel() == "Allele fraction"
-    assert tuple(ax_cnq.get_ylim()) == pytest.approx((0.0, 105.0))
+    assert tuple(ax_cnq.get_ylim()) == pytest.approx((-5.0, 105.0))
     assert ax_hist.get_xlabel() == "Sample overdispersion"
 
     af_point_counts = [
@@ -507,11 +512,30 @@ def test_plot_sample_with_variance_omits_filtered_panel_and_filtered_af_cnq(
         if hasattr(collection, "get_offsets") and len(collection.get_offsets()) > 0
     ]
     assert sum(af_point_counts) == 2
+    af_legend = ax_af.get_legend()
+    assert af_legend is not None
+    assert af_legend._ncols == 2
+    assert af_legend._mode is None
+    assert [text.get_text() for text in af_legend.get_texts()] == [
+        "AF grid (1/4, 1/3, 1/2, 2/3, 3/4)"
+    ]
     cnq_score_lines = [
         line for line in ax_cnq.lines if line.get_drawstyle() == "steps-mid"
     ]
-    assert len(cnq_score_lines) == 1
-    assert np.isfinite(cnq_score_lines[0].get_ydata()).sum() == 1
+    assert len(cnq_score_lines) == 2
+    cnq_legend = ax_cnq.get_legend()
+    assert cnq_legend is not None
+    assert cnq_legend._ncols == 2
+    assert cnq_legend._mode is None
+    assert [text.get_text() for text in cnq_legend.get_texts()] == ["CNQ", "PLQ"]
+
+    cnq_labeled = next(line for line in cnq_score_lines if line.get_label() == "CNQ")
+    plq_labeled = next(line for line in cnq_score_lines if line.get_label() == "PLQ")
+    assert cnq_labeled.get_color() == "#5C6BC0"
+    assert plq_labeled.get_color() == "#00897B"
+    np.testing.assert_allclose(cnq_labeled.get_xdata(), [0.0, 0.5])
+    np.testing.assert_allclose(cnq_labeled.get_ydata(), [20.0, 60.0])
+    np.testing.assert_allclose(plq_labeled.get_ydata(), [55.0, 55.0])
 
 
 def test_plot_helpers_prefer_plot_normalized_depth_columns() -> None:

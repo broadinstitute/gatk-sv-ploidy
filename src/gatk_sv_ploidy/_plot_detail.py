@@ -17,7 +17,10 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 
-from gatk_sv_ploidy._util import add_chromosome_labels, compute_cnq_from_probabilities
+from gatk_sv_ploidy._util import (
+    add_chromosome_labels,
+    compute_cnq_from_probabilities,
+)
 from gatk_sv_ploidy._plot_style import (
     ANNOTATION_SIZE_PT,
     AXIS_LABEL_SIZE_PT,
@@ -34,9 +37,11 @@ from gatk_sv_ploidy._plot_style import (
 # CN state palette shared with the report overview plots.
 _CN_COLORS = [CN_STATE_PALETTE[i] for i in range(6)]
 _CNQ_TRACK_COLOR = "#5C6BC0"
+_PLQ_TRACK_COLOR = "#00897B"
 _IGNORED_BIN_COLOR = "#FFB300"
 _NON_DIPLOID_BASELINE_COLOR = "#7B1FA2"
-_SCORE_TRACK_YLIM = (0.0, 105.0)
+_SCORE_TRACK_YLIM = (-5.0, 105.0)
+_SCORE_TRACK_HEIGHT_RATIO = 1.5
 _AF_REFERENCE_LINES = (
     (0.25, "1/4"),
     (1.0 / 3.0, "1/3"),
@@ -121,6 +126,21 @@ def _draw_af_reference_lines(ax: plt.Axes) -> None:
             linewidth=1.0 if is_half else 0.8,
             label=grid_label if value == 0.25 else "_nolegend_",
         )
+
+
+def _add_top_spanning_legend(ax: plt.Axes, ncol: int) -> None:
+    """Place a compact horizontal legend above a panel."""
+    handles, labels = ax.get_legend_handles_labels()
+    if not handles:
+        return
+    ax.legend(
+        handles,
+        labels,
+        loc="lower right",
+        bbox_to_anchor=(1.0, 1.02),
+        ncol=ncol,
+        borderaxespad=0,
+    )
 
 
 def _draw_site_af_scatter(
@@ -209,7 +229,7 @@ def _draw_site_af_scatter(
             roh_x, [0.0] * len(roh_x),
             s=6, alpha=0.25, color="#9E9E9E",
             marker="^", rasterized=True, zorder=1, linewidths=0,
-            label="Hom. (no het sites)",
+            label="_nolegend_",
         )
 
     if scatter_x:
@@ -223,11 +243,13 @@ def _draw_site_af_scatter(
 def _draw_score_track(
     ax: plt.Axes,
     x: np.ndarray,
+    chromosomes: np.ndarray,
     values: np.ndarray,
     color: str,
+    label: str,
     retained_mask: Optional[np.ndarray] = None,
 ) -> None:
-    """Render a dense per-bin score track as a step profile rather than bars."""
+    """Render a chromosome-disjoint step-line score track."""
     finite_mask = np.isfinite(values)
     if retained_mask is not None:
         finite_mask &= np.asarray(retained_mask, dtype=bool)
@@ -235,30 +257,28 @@ def _draw_score_track(
     if not np.any(finite_mask):
         return
 
+    boundaries = np.concatenate(
+        [[0], np.where(chromosomes[:-1] != chromosomes[1:])[0] + 1, [len(chromosomes)]]
+    )
+    needs_label = True
     plot_values = np.where(finite_mask, values, np.nan)
-    ax.fill_between(
-        x,
-        0.0,
-        plot_values,
-        where=np.isfinite(plot_values),
-        step="mid",
-        color=color,
-        alpha=0.18,
-        linewidth=0,
-        rasterized=True,
-        zorder=1.5,
-    )
-    ax.plot(
-        x,
-        plot_values,
-        color=color,
-        alpha=0.95,
-        linewidth=0.6,
-        drawstyle="steps-mid",
-        solid_capstyle="butt",
-        rasterized=True,
-        zorder=2.0,
-    )
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+        chrom_values = plot_values[start:end]
+        if not np.isfinite(chrom_values).any():
+            continue
+        ax.plot(
+            x[start:end],
+            chrom_values,
+            color=color,
+            alpha=0.95,
+            linewidth=1.0,
+            drawstyle="steps-mid",
+            solid_capstyle="butt",
+            rasterized=True,
+            zorder=2.0,
+            label=label if needs_label else "_nolegend_",
+        )
+        needs_label = False
 
 
 def _draw_sample_depth_panel(
@@ -327,6 +347,34 @@ def _draw_sample_depth_panel(
     ax.set_xlim([x_min, x_max])
 
 
+def _contig_plq_track_values(
+    sample_data: pd.DataFrame,
+    cnq: np.ndarray,
+    chromosome_plq_map: Optional[Dict[str, float]] = None,
+    retained_mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Return chromosome-level PLQ values broadcast across bins."""
+    chrs = sample_data["chr"].astype(str)
+    if chromosome_plq_map:
+        mapped = chrs.map(chromosome_plq_map)
+        if mapped.notna().any():
+            return mapped.to_numpy(dtype=float)
+
+    finite_mask = np.isfinite(cnq)
+    if retained_mask is not None:
+        finite_mask &= np.asarray(retained_mask, dtype=bool)
+
+    plq_by_chr: dict[str, float] = {}
+    for chrom in pd.unique(chrs):
+        chrom_mask = (chrs == chrom).to_numpy(dtype=bool) & finite_mask
+        chrom_cnq = cnq[chrom_mask]
+        if chrom_cnq.size == 0:
+            plq_by_chr[str(chrom)] = float("nan")
+            continue
+        plq_by_chr[str(chrom)] = float(np.clip(np.rint(chrom_cnq.mean()), 0.0, 99.0))
+    return chrs.map(plq_by_chr).to_numpy(dtype=float)
+
+
 def plot_sample_with_variance(
     sample_data: pd.DataFrame,
     all_sample_vars: Optional[np.ndarray],
@@ -336,6 +384,7 @@ def plot_sample_with_variance(
     autosomal_baseline_cn: int = 2,
     site_data: Optional[Dict[str, np.ndarray]] = None,
     sample_idx_map: Optional[Dict[str, int]] = None,
+    chromosome_plq_map: Optional[Dict[str, float]] = None,
     min_het_alt: int = 3,
     detail_note: Optional[str] = None,
 ) -> None:
@@ -360,6 +409,7 @@ def plot_sample_with_variance(
             ``bin_start``, ``bin_end``, ``sample_ids``.
         sample_idx_map: Optional mapping of sample name to column index in
             the site-data arrays.
+        chromosome_plq_map: Optional chromosome → true contig PLQ map.
         detail_note: Optional short note appended to the plot title.
     """
     name = sample_data["sample"].iloc[0]
@@ -396,6 +446,7 @@ def plot_sample_with_variance(
     chrs = sample_data["chr"].values
     has_cnq = False
     cnq: Optional[np.ndarray] = None
+    plq: Optional[np.ndarray] = None
     if "cnq" in sample_data.columns and np.isfinite(sample_data["cnq"].to_numpy(dtype=float)).any():
         cnq = sample_data["cnq"].to_numpy(dtype=float)
         has_cnq = True
@@ -426,11 +477,18 @@ def plot_sample_with_variance(
 
     has_filtered_bins = bool(np.any(ignored_mask))
     retained_mask = ~ignored_mask
+    if cnq is not None:
+        plq = _contig_plq_track_values(
+            sample_data,
+            cnq,
+            chromosome_plq_map=chromosome_plq_map,
+            retained_mask=retained_mask if has_filtered_bins else None,
+        )
     height_ratios: list[int] = [2]
     if has_af:
         height_ratios.append(2)
     if has_cnq:
-        height_ratios.append(1)
+        height_ratios.append(_SCORE_TRACK_HEIGHT_RATIO)
     if has_sample_var:
         height_ratios.append(1)
 
@@ -488,23 +546,36 @@ def plot_sample_with_variance(
         ax.set_ylabel("Allele fraction")
         ax.set_ylim([-0.05, 1.05])
         ax.set_xlim([x_min, x_max])
-        ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.02), borderaxespad=0)
+        _add_top_spanning_legend(ax, ncol=2)
         ax.grid(True, axis="y", alpha=0.3)
 
-    # CN quality bar plot (half height)
+    # CNQ/PLQ score track
     if ax_cn_prob is not None and cnq is not None:
         ax = ax_cn_prob
         _draw_score_track(
             ax,
             x,
+            chrs,
             cnq,
             color=_CNQ_TRACK_COLOR,
+            label="CNQ",
             retained_mask=retained_mask if has_filtered_bins else None,
         )
+        if plq is not None:
+            _draw_score_track(
+                ax,
+                x,
+                chrs,
+                plq,
+                color=_PLQ_TRACK_COLOR,
+                label="PLQ",
+                retained_mask=retained_mask if has_filtered_bins else None,
+            )
         ax.set_ylabel("CNQ")
         ax.set_ylim(_SCORE_TRACK_YLIM)
         ax.set_xlim([x_min, x_max])
         ax.grid(True, axis="y", alpha=0.3)
+        _add_top_spanning_legend(ax, ncol=2)
 
     # Sample overdispersion histogram (half height)
     if ax_hist is not None and svar is not None:

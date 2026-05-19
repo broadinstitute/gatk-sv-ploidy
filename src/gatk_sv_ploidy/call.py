@@ -939,7 +939,7 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--prob-threshold", type=float, default=0.5,
+        "--prob-threshold", type=float, default=0.8,
         help="Minimum mean chromosome CN probability used when rebuilding aneuploid flags from filtered bins.",
     )
     return p.parse_args()

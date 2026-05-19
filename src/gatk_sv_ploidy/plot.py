@@ -1,0 +1,1349 @@
+"""
+Plot subcommand — generate diagnostic and summary plots.
+
+Reads chromosome-level and (optionally) bin-level statistics plus training
+loss, then produces histograms, sex-assignment scatter, per-contig boxplots,
+per-bin chromosome plots, per-sample CN plots, and model-diagnostic plots.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.colors import BoundaryNorm, ListedColormap
+
+from gatk_sv_ploidy._logging import log_output_artifacts, tool_logging_context
+from gatk_sv_ploidy._util import (
+    BINQ_FIELD_OPTIONS,
+    add_chromosome_labels,
+    baseline_ploidy_label,
+    get_chromosome_type,
+    resolve_binq_field,
+    save_and_close_plot,
+)
+from gatk_sv_ploidy._plot_detail import (
+    plot_cn_per_bin_chromosome,
+    plot_cn_per_contig_boxplot,
+    plot_sample_with_variance,
+    plot_sex_assignments,
+)
+from gatk_sv_ploidy._plot_ppd import run_ppd_plots
+from gatk_sv_ploidy._plot_report import write_plot_report
+from gatk_sv_ploidy._plot_style import (
+    CHR_TYPE_PALETTE,
+    CN_STATE_PALETTE,
+    HIGHLIGHT_COLOR,
+    TICK_LABEL_SIZE_PT,
+    apply_theme,
+    double_column_size,
+    plot_output_format,
+    single_column_size,
+)
+from gatk_sv_ploidy.data import load_site_data, read_depth_tsv
+
+
+# ── histogram helpers ───────────────────────────────────────────────────────
+
+_CHR_PALETTE = CHR_TYPE_PALETTE
+_SEX_CHROMS = frozenset({"chrX", "chrY"})
+_DIAGNOSTIC_HISTOGRAM_SPECS: tuple[dict[str, object], ...] = (
+    {
+        "source_columns": ("sample_overdispersion_map",),
+        "title": "Sample Overdispersion by Chromosome Type",
+        "xlabel": "Sample Overdispersion",
+        "filename": "hist_sample_overdispersion.png",
+    },
+    {
+        "source_columns": ("sample_depth_map",),
+        "title": "Sample Depth Map by Chromosome Type",
+        "xlabel": "Sample Depth Map",
+        "filename": "hist_sample_depth_map.png",
+    },
+    {
+        "source_columns": ("copy_number",),
+        "title": "Copy Number by Chromosome Type",
+        "xlabel": "Copy Number",
+        "filename": "hist_copy_number.png",
+    },
+    {
+        "source_columns": ("plq",),
+        "title": "PLQ by Chromosome Type",
+        "xlabel": "PLQ",
+        "filename": "hist_plq.png",
+    },
+    {
+        "source_columns": ("n_bins_retained",),
+        "title": "Bins Retained by Chromosome Type",
+        "xlabel": "Bins Retained",
+        "filename": "hist_n_bins_retained.png",
+    },
+    {
+        "source_columns": ("frac_bins_retained",),
+        "title": "Fraction of Bins Retained by Chromosome Type",
+        "xlabel": "Fraction of Bins Retained",
+        "filename": "hist_frac_bins_retained.png",
+    },
+    {
+        "source_columns": ("autosomal_baseline_cn",),
+        "title": "Autosomal Baseline CN by Chromosome Type",
+        "xlabel": "Autosomal Baseline CN",
+        "filename": "hist_autosomal_baseline_cn.png",
+    },
+    {
+        "source_columns": ("sample_depth_ratio",),
+        "title": "Sample Depth Ratio by Chromosome Type",
+        "xlabel": "Sample Depth Ratio",
+        "filename": "hist_sample_depth_ratio.png",
+    },
+    {
+        "source_columns": ("global_cn_scale_factor",),
+        "title": "Global CN Scale Factor by Chromosome Type",
+        "xlabel": "Global CN Scale Factor",
+        "filename": "hist_global_cn_scale_factor.png",
+    },
+)
+
+
+def _apply_plot_depth_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Replace raw-depth summary columns with plot-normalized variants."""
+    plot_map = {
+        "mean_depth": "plot_mean_depth",
+        "std_depth": "plot_std_depth",
+        "median_depth": "plot_median_depth",
+        "mad_depth": "plot_mad_depth",
+    }
+    out = df.copy()
+    for base_col, plot_col in plot_map.items():
+        if plot_col in out.columns:
+            out[base_col] = out[plot_col]
+    return out
+
+
+def _apply_plot_depth_bin_columns(bin_df: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Replace raw per-bin observed depth with plot-normalized depth."""
+    if bin_df is None:
+        return None
+    out = bin_df.copy()
+    if "plot_depth" in out.columns:
+        if "raw_observed_depth" not in out.columns and "observed_depth" in out.columns:
+            out["raw_observed_depth"] = out["observed_depth"]
+        out["observed_depth"] = out["plot_depth"]
+    return out
+
+
+def _apply_plot_depth_sex_columns(
+    sex_df: pd.DataFrame,
+    chr_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Populate sex-scatter depths from plot-normalized chromosome summaries."""
+    out = sex_df.copy()
+    chr_depth_df = chr_df[chr_df["chromosome"].isin(["chrX", "chrY"])]
+    if chr_depth_df.empty:
+        return out
+
+    depth_pivot = chr_depth_df.pivot(
+        index="sample",
+        columns="chromosome",
+        values="median_depth",
+    )
+    if "chrX" in depth_pivot.columns:
+        out["chrX_depth"] = out["sample"].map(depth_pivot["chrX"])
+    if "chrY" in depth_pivot.columns:
+        out["chrY_depth"] = out["sample"].map(depth_pivot["chrY"])
+    return out
+
+
+def _apply_plot_baseline_manifest(
+    sex_df: pd.DataFrame,
+    baseline_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Override plot baseline labels from the polyploidy manifest."""
+    if baseline_df is None or baseline_df.empty or "sample" not in baseline_df.columns:
+        return sex_df
+
+    merge_cols = [
+        col
+        for col in ("sample", "autosomal_baseline_cn", "baseline_cn_call")
+        if col in baseline_df.columns
+    ]
+    if merge_cols == ["sample"]:
+        return sex_df
+
+    baseline_view = baseline_df[merge_cols].drop_duplicates(
+        subset=["sample"],
+        keep="last",
+    )
+    out = sex_df.copy()
+    replace_cols = [
+        col for col in merge_cols
+        if col != "sample" and col in out.columns
+    ]
+    if replace_cols:
+        out = out.drop(columns=replace_cols)
+    out = out.merge(baseline_view, on="sample", how="left")
+
+    if "baseline_ploidy_type" not in out.columns:
+        out["baseline_ploidy_type"] = pd.Series(
+            pd.NA,
+            index=out.index,
+            dtype="object",
+        )
+    if "baseline_cn_call" in out.columns:
+        has_baseline_call = out["baseline_cn_call"].notna()
+        out.loc[has_baseline_call, "baseline_ploidy_type"] = (
+            out.loc[has_baseline_call, "baseline_cn_call"].astype(str)
+        )
+    return out
+
+
+def _baseline_metadata_from_manifest(
+    baseline_df: pd.DataFrame | None,
+) -> dict[str, dict[str, object]]:
+    """Return sample-level baseline metadata from the polyploidy manifest."""
+    metadata: dict[str, dict[str, object]] = {}
+    if baseline_df is None or baseline_df.empty or "sample" not in baseline_df.columns:
+        return metadata
+
+    baseline_view = baseline_df.drop_duplicates(subset=["sample"], keep="last")
+    for _, row in baseline_view.iterrows():
+        baseline_cn = 2
+        if "autosomal_baseline_cn" in row.index:
+            cn_value = pd.to_numeric(
+                pd.Series([row["autosomal_baseline_cn"]]),
+                errors="coerce",
+            ).iloc[0]
+            if pd.notna(cn_value):
+                baseline_cn = int(cn_value)
+
+        baseline_type = None
+        if "baseline_cn_call" in row.index and pd.notna(row["baseline_cn_call"]):
+            baseline_type = str(row["baseline_cn_call"])
+        elif baseline_cn == 0:
+            baseline_type = "UNDETERMINED"
+
+        metadata[str(row["sample"])] = {
+            "baseline_ploidy_type": baseline_type or baseline_ploidy_label(baseline_cn),
+            "autosomal_baseline_cn": baseline_cn,
+        }
+
+    return metadata
+
+
+def _sample_plot_data_from_preprocessed_depth(
+    preprocessed_depth_df: pd.DataFrame | None,
+    sample: str,
+) -> pd.DataFrame | None:
+    """Build plot-normalized depth rows for a sample excluded from infer."""
+    if preprocessed_depth_df is None or sample not in preprocessed_depth_df.columns:
+        return None
+
+    sample_df = preprocessed_depth_df[["Chr", "Start", "End", sample]].copy()
+    sample_df = sample_df.rename(
+        columns={
+            "Chr": "chr",
+            "Start": "start",
+            "End": "end",
+            sample: "observed_depth",
+        }
+    )
+    sample_df["sample"] = str(sample)
+    sample_df["observed_depth"] = pd.to_numeric(
+        sample_df["observed_depth"],
+        errors="coerce",
+    )
+    sample_df = sample_df.dropna(subset=["observed_depth"]).reset_index(drop=True)
+
+    bin_length_kb = np.maximum(
+        sample_df["end"].to_numpy(dtype=np.float64) -
+        sample_df["start"].to_numpy(dtype=np.float64),
+        1.0,
+    ) / 1000.0
+    autosome_mask = sample_df["chr"].astype(str).str.match(r"^chr([1-9]|1[0-9]|2[0-2])$")
+    if not autosome_mask.any():
+        autosome_mask = pd.Series(True, index=sample_df.index)
+    autosome_depth_per_kb = np.divide(
+        sample_df.loc[autosome_mask, "observed_depth"].to_numpy(dtype=np.float64),
+        bin_length_kb[autosome_mask.to_numpy(dtype=bool)],
+        out=np.zeros(int(autosome_mask.sum()), dtype=np.float64),
+        where=bin_length_kb[autosome_mask.to_numpy(dtype=bool)] > 0,
+    )
+    diploid_depth_per_kb = max(float(np.median(autosome_depth_per_kb)), 1e-8)
+    sample_df["observed_depth"] = np.divide(
+        2.0 * sample_df["observed_depth"].to_numpy(dtype=np.float64),
+        bin_length_kb * diploid_depth_per_kb,
+        out=np.zeros(len(sample_df), dtype=np.float64),
+        where=(bin_length_kb * diploid_depth_per_kb) > 0,
+    )
+    return sample_df[["sample", "chr", "start", "end", "observed_depth"]]
+
+
+def _annotate_ignored_bins(
+    bin_df: pd.DataFrame | None,
+    ignored_bins_df: pd.DataFrame | None,
+) -> pd.DataFrame | None:
+    """Merge call-time ignored-bin annotations into per-bin plotting data."""
+    if bin_df is None or ignored_bins_df is None:
+        return bin_df
+
+    required_cols = {"sample", "chr", "start", "end"}
+    missing_cols = required_cols - set(ignored_bins_df.columns)
+    if missing_cols:
+        missing = ", ".join(sorted(missing_cols))
+        raise ValueError(f"Ignored bins file is missing required columns: {missing}")
+
+    keep_cols = [
+        col
+        for col in [
+            "sample",
+            "chr",
+            "start",
+            "end",
+            "ignored_in_call",
+            "binq_field",
+            "binq_value",
+            "min_binq",
+        ]
+        if col in ignored_bins_df.columns
+    ]
+    annot_df = ignored_bins_df[keep_cols].copy()
+    if "ignored_in_call" not in annot_df.columns:
+        annot_df["ignored_in_call"] = True
+
+    out = bin_df.merge(
+        annot_df,
+        on=["sample", "chr", "start", "end"],
+        how="left",
+        suffixes=("", "__ignored"),
+    )
+    for col in ("binq_field", "binq_value", "min_binq"):
+        ignored_col = f"{col}__ignored"
+        if ignored_col not in out.columns:
+            continue
+        if col in out.columns:
+            out[col] = out[col].where(out[col].notna(), out[ignored_col])
+        else:
+            out[col] = out[ignored_col]
+        out = out.drop(columns=[ignored_col])
+    ignored_series = out["ignored_in_call"].fillna(False)
+    if ignored_series.dtype == object:
+        ignored_series = ignored_series.astype(str).str.lower().isin(["true", "1", "yes"])
+    out["ignored_in_call"] = ignored_series.astype(bool)
+
+    ignored_fraction = (
+        out.groupby(["chr", "start", "end"], sort=False)["ignored_in_call"]
+        .mean()
+        .rename("ignored_fraction_in_call")
+        .reset_index()
+    )
+    out = out.merge(
+        ignored_fraction,
+        on=["chr", "start", "end"],
+        how="left",
+    )
+    out["ignored_fraction_in_call"] = out["ignored_fraction_in_call"].fillna(0.0)
+    return out
+
+
+def _annotate_binq_values(
+    bin_df: pd.DataFrame | None,
+    bin_quality_df: pd.DataFrame | None,
+    binq_field: str,
+) -> pd.DataFrame | None:
+    """Merge per-bin PPD quality values into plotting bin statistics."""
+    if bin_df is None or bin_quality_df is None:
+        return bin_df
+
+    binq_field = resolve_binq_field(bin_quality_df, binq_field)
+    required_cols = {"chr", "start", "end", binq_field}
+    missing_cols = required_cols - set(bin_quality_df.columns)
+    if missing_cols:
+        missing = ", ".join(sorted(missing_cols))
+        raise ValueError(
+            f"PPD bin quality file is missing required columns: {missing}"
+        )
+
+    annot_df = bin_quality_df[["chr", "start", "end", binq_field]].copy()
+    annot_df["binq_field"] = binq_field
+    annot_df["binq_value"] = annot_df[binq_field].astype(float)
+    annot_df = annot_df.drop(columns=[binq_field])
+
+    out = bin_df.merge(
+        annot_df,
+        on=["chr", "start", "end"],
+        how="left",
+        suffixes=("", "__quality"),
+    )
+    for col in ("binq_field", "binq_value"):
+        quality_col = f"{col}__quality"
+        if quality_col not in out.columns:
+            continue
+        if col in out.columns:
+            out[col] = out[col].where(out[col].notna(), out[quality_col])
+        else:
+            out[col] = out[quality_col]
+        out = out.drop(columns=[quality_col])
+    return out
+
+
+def _sample_baseline_ploidy_metadata(
+    chrom_df: pd.DataFrame,
+    sex_df: Optional[pd.DataFrame] = None,
+) -> dict[str, dict[str, object]]:
+    """Return sample-level baseline ploidy metadata for plotting."""
+    metadata: dict[str, dict[str, object]] = {}
+    if "sample" not in chrom_df.columns:
+        return metadata
+
+    for sample, sdf in chrom_df.groupby("sample", sort=False):
+        baseline_cn = 2
+        baseline_type = None
+        if "baseline_cn_call" in sdf.columns:
+            call_values = sdf["baseline_cn_call"].dropna()
+            if not call_values.empty:
+                baseline_type = str(call_values.iloc[0])
+        if "autosomal_baseline_cn" in sdf.columns:
+            values = pd.to_numeric(
+                sdf["autosomal_baseline_cn"],
+                errors="coerce",
+            ).dropna()
+            if not values.empty:
+                baseline_cn = int(values.iloc[0])
+        metadata[str(sample)] = {
+            "baseline_ploidy_type": (
+                baseline_type or baseline_ploidy_label(baseline_cn)
+            ),
+            "autosomal_baseline_cn": baseline_cn,
+        }
+
+    if sex_df is not None and "sample" in sex_df.columns:
+        for _, row in sex_df.iterrows():
+            sample = str(row["sample"])
+            entry = metadata.setdefault(
+                sample,
+                {
+                    "baseline_ploidy_type": "DIPLOID",
+                    "autosomal_baseline_cn": 2,
+                },
+            )
+            if "autosomal_baseline_cn" in row.index and pd.notna(row["autosomal_baseline_cn"]):
+                baseline_cn = int(row["autosomal_baseline_cn"])
+                entry["autosomal_baseline_cn"] = baseline_cn
+                entry["baseline_ploidy_type"] = baseline_ploidy_label(
+                    baseline_cn,
+                )
+            if "baseline_cn_call" in row.index and pd.notna(row["baseline_cn_call"]):
+                entry["baseline_ploidy_type"] = str(row["baseline_cn_call"])
+            elif "baseline_ploidy_type" in row.index and pd.notna(row["baseline_ploidy_type"]):
+                entry["baseline_ploidy_type"] = str(row["baseline_ploidy_type"])
+
+    return metadata
+
+
+def _prepare_chromosome_cn_heatmap_data(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """Return display CN and confidence matrices for the chromosome heatmap.
+
+    Autosomes fall back to the sample baseline copy number unless they are
+    explicitly flagged as aneuploid. This keeps the cohort heatmap aligned with
+    the call semantics while retaining raw chrX/chrY copy-number states.
+    """
+    chr_order = [f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"]
+    chr_order = [c for c in chr_order if c in df["chromosome"].unique()]
+
+    plot_df = df.copy()
+    display_cn = pd.to_numeric(plot_df["copy_number"], errors="coerce")
+    if "is_aneuploid" in plot_df.columns:
+        is_autosome = ~plot_df["chromosome"].isin(_SEX_CHROMS)
+        if "autosomal_baseline_cn" in plot_df.columns:
+            baseline_cn = pd.to_numeric(
+                plot_df["autosomal_baseline_cn"],
+                errors="coerce",
+            ).fillna(2.0)
+        else:
+            baseline_cn = pd.Series(2.0, index=plot_df.index, dtype=float)
+        keep_raw_cn = (~is_autosome) | plot_df["is_aneuploid"].fillna(False)
+        display_cn = display_cn.where(keep_raw_cn, baseline_cn)
+
+    plot_df["display_copy_number"] = display_cn
+    cn_pivot = plot_df.pivot(
+        index="sample",
+        columns="chromosome",
+        values="display_copy_number",
+    )
+    cn_pivot = cn_pivot.reindex(columns=chr_order)
+
+    if "mean_cn_probability" in plot_df.columns:
+        prob_pivot = plot_df.pivot(
+            index="sample",
+            columns="chromosome",
+            values="mean_cn_probability",
+        )
+        prob_pivot = prob_pivot.reindex(columns=chr_order)
+    else:
+        prob_pivot = pd.DataFrame(1.0, index=cn_pivot.index, columns=chr_order)
+
+    return cn_pivot, prob_pivot, chr_order
+
+
+def _hist_by_hue(
+    data: pd.DataFrame,
+    x_col: str,
+    hue_col: str,
+    title: str,
+    xlabel: str,
+    output_dir: str,
+    filename: str,
+    palette: dict[str, str],
+    bins: int = 30,
+    highlight_sample: str = "",
+    sample_values: Optional[list] = None,
+) -> None:
+    """Histogram coloured by *hue_col* with optional sample highlight."""
+    fig, ax = plt.subplots(figsize=single_column_size(68))
+    sns.histplot(data=data, x=x_col, hue=hue_col, bins=bins, kde=False,
+                 palette=palette, alpha=0.6, edgecolor="black", ax=ax,
+                 multiple="stack")
+
+    if highlight_sample and sample_values:
+        for v in sample_values:
+            ax.axvline(v, color=HIGHLIGHT_COLOR, linestyle="--", linewidth=2, alpha=0.8)
+        ax.plot([], [], color=HIGHLIGHT_COLOR, linestyle="--", linewidth=2,
+                label=" " + highlight_sample)
+        ax.legend(loc="best", framealpha=0.9)
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Frequency")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    save_and_close_plot(output_dir, filename)
+
+
+# ── chromosome-type histograms ─────────────────────────────────────────────
+
+
+def plot_histograms_by_chr_type(
+    df: pd.DataFrame, output_dir: str, highlight_sample: str = ""
+) -> None:
+    """Create curated diagnostic histograms, grouped by chromosome type.
+
+    Args:
+        df: ``chromosome_stats.tsv`` DataFrame.
+        output_dir: Base output directory.
+        highlight_sample: Sample ID to mark with vertical lines.
+    """
+    df = df.copy()
+    df["chr_type"] = df["chromosome"].apply(get_chromosome_type)
+    highlight_df = None
+    if highlight_sample and highlight_sample in df["sample"].values:
+        highlight_df = df[df["sample"] == highlight_sample]
+
+    for spec in _DIAGNOSTIC_HISTOGRAM_SPECS:
+        source_col = next(
+            (
+                col for col in spec["source_columns"]
+                if col in df.columns and pd.api.types.is_numeric_dtype(df[col])
+            ),
+            None,
+        )
+        if source_col is None:
+            continue
+
+        sample_values = None
+        if highlight_df is not None:
+            sample_values = highlight_df[source_col].tolist()
+
+        _hist_by_hue(
+            df,
+            source_col,
+            "chr_type",
+            str(spec["title"]),
+            str(spec["xlabel"]),
+            output_dir,
+            str(spec["filename"]),
+            _CHR_PALETTE,
+            bins=30,
+            highlight_sample=highlight_sample,
+            sample_values=sample_values,
+        )
+
+
+# ── median-depth distribution ──────────────────────────────────────────────
+
+
+def plot_median_depth_distributions(
+    df: pd.DataFrame, output_dir: str, highlight_sample: str = ""
+) -> None:
+    """Error-bar plots of median depth ± MAD for every chromosome.
+
+    Args:
+        df: ``chromosome_stats.tsv`` DataFrame.
+        output_dir: Base output directory.
+        highlight_sample: Sample ID to highlight.
+    """
+    if "median_depth" not in df.columns or "mad_depth" not in df.columns:
+        return
+
+    stats_df = df[
+        [
+            "sample",
+            "chromosome",
+            "copy_number",
+            "mean_depth",
+            "median_depth",
+            "mad_depth",
+        ]
+    ].copy()
+    stats_path = os.path.join(output_dir, "median_depth_distribution_stats.tsv")
+    stats_df.to_csv(stats_path, sep="\t", index=False)
+
+    chroms = sorted(
+        stats_df["chromosome"].unique(),
+        key=lambda x: (x in ("chrX", "chrY"),
+                       int(x.replace("chr", "")) if x.replace("chr", "").isdigit() else 0, x),
+    )
+
+    pdf_path = os.path.join(output_dir, "median_depth_distributions.pdf")
+    with PdfPages(pdf_path) as pdf:
+        for chrom in chroms:
+            cdf = stats_df[stats_df["chromosome"] == chrom].sort_values("median_depth")
+            fig, ax = plt.subplots(figsize=double_column_size(78))
+
+            hl_pos = None
+            if highlight_sample and highlight_sample in cdf["sample"].values:
+                hl_pos = cdf.index.get_loc(
+                    cdf[cdf["sample"] == highlight_sample].index[0]
+                )
+
+            ax.errorbar(range(len(cdf)), cdf["median_depth"], yerr=cdf["mad_depth"],
+                        fmt="o", markerfacecolor="blue", markeredgecolor="blue",
+                        ecolor="black", capsize=2, linestyle="none", alpha=0.7)
+
+            if hl_pos is not None:
+                row = cdf.iloc[hl_pos]
+                ax.errorbar([hl_pos], [row["median_depth"]], yerr=[row["mad_depth"]],
+                            fmt="^", markerfacecolor="magenta", markeredgecolor="black",
+                            ecolor="magenta", capsize=4, markersize=10, linewidth=2,
+                            linestyle="none", label=" " + highlight_sample)
+                ax.legend(loc="best", framealpha=0.9)
+
+            ax.set_xlabel("Sample Index")
+            ax.set_ylabel("Median Depth")
+            ax.set_title(f"Median Depth for {chrom} with MAD")
+            ax.set_xticks(range(len(cdf)))
+            ax.set_xticklabels(cdf["sample"], rotation=90, fontsize=TICK_LABEL_SIZE_PT)
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close()
+
+
+# ── bin variance / bias ────────────────────────────────────────────────────
+
+
+def plot_bin_variance_bias(bin_df: pd.DataFrame, output_dir: str) -> None:
+    """Two-panel plot of per-bin bias and stdev.
+
+    Args:
+        bin_df: ``bin_stats.tsv.gz`` DataFrame.
+        output_dir: Base output directory.
+    """
+    unique = bin_df.groupby(["chr", "start", "end"]).first().reset_index()
+    unique = unique.sort_values(["chr", "start"])
+
+    fig, axes = plt.subplots(2, 1, figsize=double_column_size(96))
+    x = np.arange(len(unique))
+    chrs = unique["chr"].values
+
+    axes[0].plot(x, unique["bin_bias"].values, "o", alpha=0.5, markersize=3,
+                 color="black", label="Bin bias")
+    axes[0].axhline(1.0, color="red", linestyle="--", alpha=0.5, label="No bias")
+    axes[0].set_ylabel("Bin mean bias")
+    axes[0].set_title("Bin Posteriors")
+    axes[0].set_xlim([x.min(), x.max()])
+
+    axes[1].plot(x, np.sqrt(unique["bin_var"].values), "o", alpha=0.5,
+                 markersize=3, color="purple", label="Bin stdev")
+    axes[1].set_ylabel("Bin stdev")
+    axes[1].set_xlim([x.min(), x.max()])
+
+    if "ignored_fraction_in_call" in unique.columns:
+        ignored_mask = unique["ignored_fraction_in_call"].to_numpy(dtype=float) > 0
+        if np.any(ignored_mask):
+            ignored_frac = unique.loc[ignored_mask, "ignored_fraction_in_call"].to_numpy(dtype=float)
+            ignored_size = 14.0 + 80.0 * ignored_frac
+            axes[0].scatter(
+                x[ignored_mask],
+                unique.loc[ignored_mask, "bin_bias"].to_numpy(dtype=float),
+                s=ignored_size,
+                facecolors="none",
+                edgecolors="#FFB300",
+                linewidths=1.2,
+                label="Filtered",
+                zorder=4,
+            )
+            axes[1].scatter(
+                x[ignored_mask],
+                np.sqrt(unique.loc[ignored_mask, "bin_var"].to_numpy(dtype=float)),
+                s=ignored_size,
+                facecolors="none",
+                edgecolors="#FFB300",
+                linewidths=1.2,
+                label="Filtered",
+                zorder=4,
+            )
+
+    for a in axes:
+        add_chromosome_labels(a, chrs)
+        if a.get_legend_handles_labels()[0]:
+            a.legend(loc="best", framealpha=0.9)
+
+    plt.tight_layout()
+    save_and_close_plot(output_dir, "bin_posteriors.png")
+
+
+# ── chromosome CN heatmap ──────────────────────────────────────────────────
+
+
+def plot_chromosome_cn_heatmap(
+    df: pd.DataFrame, output_dir: str
+) -> None:
+    """Heatmap of called chromosome CN per sample × chromosome.
+
+    Autosomal cells show the sample baseline CN unless the chromosome is called
+    aneuploid. chrX and chrY retain their explicit copy-number states.
+    Opacity encodes the chromosome-level CN support when available.
+
+    Args:
+        df: ``chromosome_stats.tsv`` DataFrame.
+        output_dir: Base output directory.
+    """
+    cn_pivot, prob_pivot, chr_order = _prepare_chromosome_cn_heatmap_data(df)
+
+    # Sort samples by sex-chromosome state, then broad CN burden.
+    sort_df = pd.DataFrame(index=cn_pivot.index)
+    for chrom in ("chrX", "chrY"):
+        if chrom in cn_pivot.columns:
+            sort_df[chrom] = cn_pivot[chrom]
+    sort_df["mean_cn"] = cn_pivot.mean(axis=1)
+    sort_df["sample_id"] = cn_pivot.index.astype(str)
+    sort_order = sort_df.sort_values(list(sort_df.columns)).index
+    cn_pivot = cn_pivot.reindex(sort_order)
+    prob_pivot = prob_pivot.reindex(cn_pivot.index)
+
+    n_samples = len(cn_pivot)
+    show_labels = n_samples <= 60
+
+    values = np.ma.masked_invalid(cn_pivot.to_numpy(dtype=float))
+    alpha = prob_pivot.to_numpy(dtype=float)
+    alpha = np.clip(alpha, 0.25, 1.0)
+    alpha[~np.isfinite(alpha)] = 0.25
+    alpha[np.ma.getmaskarray(values)] = 0.0
+    cmap = ListedColormap([CN_STATE_PALETTE[i] for i in range(6)])
+    cmap.set_bad(color="#F0F3F7")
+    norm = BoundaryNorm(np.arange(-0.5, 6.5, 1.0), cmap.N)
+
+    fig, ax = plt.subplots(
+        figsize=double_column_size(max(60.0, 22.0 + (2.1 * n_samples)))
+    )
+    im = ax.imshow(values, aspect="auto", cmap=cmap, norm=norm,
+                   interpolation="nearest", alpha=alpha)
+    ax.set_xticks(np.arange(len(chr_order)))
+    ax.set_xticklabels([c.replace("chr", "") for c in chr_order], rotation=45)
+    if show_labels:
+        ax.set_yticks(np.arange(n_samples))
+        ax.set_yticklabels(cn_pivot.index, fontsize=TICK_LABEL_SIZE_PT)
+    else:
+        ax.set_yticks([])
+    ax.set_xlabel("Chromosome")
+    ax.set_ylabel("Sample")
+    ax.set_title("Called Copy Number per Sample × Chromosome")
+    cbar = plt.colorbar(im, ax=ax, label="Copy Number", ticks=np.arange(6))
+    cbar.ax.set_yticklabels([str(i) for i in range(6)])
+    plt.tight_layout()
+    save_and_close_plot(output_dir, "chromosome_cn_heatmap.png")
+
+
+def plot_chromosome_plq_heatmap(
+    df: pd.DataFrame, output_dir: str
+) -> None:
+    """Heatmap of chromosome-level PLQ per sample × chromosome."""
+    if "plq" not in df.columns:
+        return
+
+    chr_order = [f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"]
+    chr_order = [c for c in chr_order if c in df["chromosome"].unique()]
+
+    cn_pivot = df.pivot(index="sample", columns="chromosome", values="copy_number")
+    cn_pivot = cn_pivot.reindex(columns=chr_order)
+    plq_pivot = df.pivot(index="sample", columns="chromosome", values="plq")
+    plq_pivot = plq_pivot.reindex(columns=chr_order)
+
+    cn_pivot["_sort"] = cn_pivot.mean(axis=1)
+    cn_pivot = cn_pivot.sort_values("_sort")
+    cn_pivot = cn_pivot.drop("_sort", axis=1)
+    plq_pivot = plq_pivot.reindex(cn_pivot.index)
+
+    n_samples = len(plq_pivot)
+    show_labels = n_samples <= 60
+
+    values = np.ma.masked_invalid(plq_pivot.to_numpy(dtype=float))
+    cmap = plt.cm.viridis.copy()
+    cmap.set_bad(color="#EEEEEE")
+
+    fig, ax = plt.subplots(
+        figsize=double_column_size(max(60.0, 22.0 + (2.1 * n_samples)))
+    )
+    im = ax.imshow(values, aspect="auto", cmap=cmap,
+                   vmin=0, vmax=99, interpolation="nearest")
+    ax.set_xticks(np.arange(len(chr_order)))
+    ax.set_xticklabels([c.replace("chr", "") for c in chr_order], rotation=45)
+    if show_labels:
+        ax.set_yticks(np.arange(n_samples))
+        ax.set_yticklabels(plq_pivot.index, fontsize=TICK_LABEL_SIZE_PT)
+    else:
+        ax.set_yticks([])
+    ax.set_xlabel("Chromosome")
+    ax.set_ylabel("Sample")
+    ax.set_title("Chromosome PLQ per Sample × Chromosome")
+    plt.colorbar(im, ax=ax, label="PLQ")
+    plt.tight_layout()
+    save_and_close_plot(output_dir, "chromosome_plq_heatmap.png")
+
+
+def plot_binq_genome_profile(
+    bin_df: pd.DataFrame,
+    output_dir: str,
+) -> None:
+    """Genome-wide profile of per-bin BINQ values."""
+    if "binq_value" not in bin_df.columns:
+        return
+
+    group_cols = ["chr", "start", "end", "binq_value"]
+    if "binq_field" in bin_df.columns:
+        group_cols.append("binq_field")
+    if "ignored_fraction_in_call" in bin_df.columns:
+        group_cols.append("ignored_fraction_in_call")
+    unique = bin_df.groupby(["chr", "start", "end"], sort=False)[group_cols[3:]].first().reset_index()
+    unique = unique.sort_values(["chr", "start"])
+
+    values = unique["binq_value"].to_numpy(dtype=float)
+    finite_mask = np.isfinite(values)
+    if not np.any(finite_mask):
+        return
+
+    field_label = "BINQ"
+    if "binq_field" in unique.columns:
+        field_series = unique["binq_field"].dropna().astype(str)
+        if not field_series.empty:
+            field_label = field_series.iloc[0]
+
+    chrs = unique["chr"].to_numpy()
+    x = np.arange(len(unique))
+
+    fig, ax = plt.subplots(figsize=double_column_size(58))
+    ax.scatter(
+        x[finite_mask],
+        values[finite_mask],
+        s=5,
+        alpha=0.6,
+        color="#7E57C2",
+        rasterized=True,
+    )
+    if "ignored_fraction_in_call" in unique.columns:
+        ignored_mask = unique["ignored_fraction_in_call"].to_numpy(dtype=float) > 0
+        if np.any(ignored_mask):
+            ignored_frac = unique.loc[ignored_mask, "ignored_fraction_in_call"].to_numpy(dtype=float)
+            ignored_size = 14.0 + 80.0 * ignored_frac
+            ax.scatter(
+                x[ignored_mask],
+                values[ignored_mask],
+                s=ignored_size,
+                facecolors="none",
+                edgecolors="#FFB300",
+                linewidths=1.2,
+                label="Filtered",
+                zorder=4,
+            )
+    ax.set_ylabel(field_label)
+    ax.set_title(f"{field_label} per Bin")
+    ax.set_ylim([0, 99])
+    ax.set_xlim([x.min(), x.max()])
+    ax.grid(True, alpha=0.3, axis="y")
+    add_chromosome_labels(ax, chrs)
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(loc="best", framealpha=0.9)
+    save_and_close_plot(output_dir, "binq_genome_profile.png")
+
+
+# ── ELBO convergence gradient ──────────────────────────────────────────────
+
+
+def plot_training_loss_with_gradient(
+    loss_df: pd.DataFrame, output_dir: str, window: int = 50,
+) -> None:
+    """Two-panel training diagnostic: ELBO loss + rolling gradient.
+
+    The gradient panel helps assess whether training converged (gradient
+    near zero) or is still improving.
+
+    Args:
+        loss_df: DataFrame with ``epoch`` and ``elbo`` columns.
+        output_dir: Base output directory.
+        window: Rolling window size for the gradient estimate.
+    """
+    epochs = loss_df["epoch"].values
+    elbo = loss_df["elbo"].values
+
+    fig, axes = plt.subplots(2, 1, figsize=single_column_size(96), sharex=True,
+                             gridspec_kw={"height_ratios": [2, 1]})
+
+    # Panel 1: ELBO loss
+    ax = axes[0]
+    ax.plot(epochs, elbo, color="steelblue", linewidth=1)
+    ax.set_ylabel("ELBO")
+    ax.set_title("Training Loss & Convergence Diagnostic")
+    ax.grid(True, alpha=0.3)
+
+    # Panel 2: Rolling gradient (finite differences)
+    ax = axes[1]
+    if len(elbo) > window:
+        gradient = np.convolve(np.diff(elbo), np.ones(window) / window, mode="valid")
+        grad_x = epochs[1:len(gradient) + 1]
+        ax.plot(grad_x, gradient, color="darkred", linewidth=1)
+        ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
+    else:
+        grad = np.diff(elbo)
+        ax.plot(epochs[1:], grad, color="darkred", linewidth=1)
+        ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel(f"∂ELBO/∂epoch (rolling {window})")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    save_and_close_plot(output_dir, "training_loss_gradient.png")
+
+
+def plot_site_af_estimates(site_af_df: pd.DataFrame, output_dir: str) -> None:
+    """Generate site-level AF estimate diagnostics."""
+    required_cols = {
+        "chr",
+        "input_site_pop_af",
+        "naive_bayes_site_pop_af",
+        "effective_site_pop_af",
+        "pooled_observed_af",
+    }
+    missing_cols = required_cols - set(site_af_df.columns)
+    if missing_cols:
+        missing = ", ".join(sorted(missing_cols))
+        raise ValueError(
+            f"Site AF estimates file is missing required columns: {missing}"
+        )
+
+    plot_df = site_af_df.copy()
+    plot_df["chr_type"] = plot_df["chr"].apply(get_chromosome_type)
+
+    fig, ax = plt.subplots(figsize=single_column_size(68))
+    sns.histplot(
+        data=plot_df,
+        x="effective_site_pop_af",
+        hue="chr_type",
+        bins=50,
+        palette=_CHR_PALETTE,
+        multiple="stack",
+        edgecolor="black",
+        alpha=0.6,
+        ax=ax,
+    )
+    ax.set_xlabel("Effective Site Population AF")
+    ax.set_ylabel("Count")
+    ax.set_title("Effective Site AF Distribution")
+    ax.grid(True, alpha=0.3)
+    save_and_close_plot(output_dir, "site_af_effective_distribution.png")
+
+    scatter_df = plot_df[np.isfinite(plot_df["pooled_observed_af"])].copy()
+    if not scatter_df.empty:
+        fig, ax = plt.subplots(figsize=single_column_size(89))
+        sns.scatterplot(
+            data=scatter_df,
+            x="pooled_observed_af",
+            y="naive_bayes_site_pop_af",
+            hue="chr_type",
+            palette=_CHR_PALETTE,
+            s=16,
+            alpha=0.5,
+            linewidth=0,
+            ax=ax,
+        )
+        ax.plot([0.0, 1.0], [0.0, 1.0], linestyle="--", color="black", alpha=0.6)
+        ax.set_xlim(0.0, 1.0)
+        ax.set_ylim(0.0, 1.0)
+        ax.set_xlabel("Pooled Observed AF")
+        ax.set_ylabel("Naive-Bayes Site AF")
+        ax.set_title("Pooled Observed AF vs Naive-Bayes Site AF")
+        ax.grid(True, alpha=0.3)
+        save_and_close_plot(output_dir, "site_af_pooled_vs_naive_bayes.png")
+
+    fig, ax = plt.subplots(figsize=single_column_size(89))
+    sns.scatterplot(
+        data=plot_df,
+        x="input_site_pop_af",
+        y="effective_site_pop_af",
+        hue="chr_type",
+        palette=_CHR_PALETTE,
+        s=16,
+        alpha=0.5,
+        linewidth=0,
+        ax=ax,
+    )
+    ax.plot([0.0, 1.0], [0.0, 1.0], linestyle="--", color="black", alpha=0.6)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xlabel("Input Site Population AF")
+    ax.set_ylabel("Effective Site Population AF")
+    ax.set_title("Input vs Effective Site AF")
+    ax.grid(True, alpha=0.3)
+    save_and_close_plot(output_dir, "site_af_input_vs_effective.png")
+
+
+# ── orchestrators ──────────────────────────────────────────────────────────
+
+
+def _run_ploidy_plots(
+    df: pd.DataFrame,
+    bin_df: Optional[pd.DataFrame],
+    sex_df: pd.DataFrame,
+    output_dir: str,
+    highlight_sample: str = "",
+) -> None:
+    """Generate all estimatePloidy-style plots."""
+    plot_sex_assignments(sex_df, output_dir, highlight_sample)
+
+    for sex in ("male", "female", "all"):
+        for conn in (True, False):
+            plot_cn_per_contig_boxplot(
+                df,
+                output_dir,
+                sex_subset=sex,
+                connect_samples=conn,
+                highlight_sample=highlight_sample,
+            )
+
+    if bin_df is not None and not bin_df.empty:
+        autosomes = [f"chr{i}" for i in range(1, 23)]
+        for chrom in autosomes + ["chrX", "chrY"]:
+            if chrom in bin_df["chr"].unique():
+                plot_cn_per_bin_chromosome(
+                    bin_df,
+                    output_dir,
+                    chrom,
+                    highlight_sample=highlight_sample,
+                )
+
+
+def _run_aneuploidy_plots(
+    df: pd.DataFrame,
+    bin_df: pd.DataFrame,
+    loss_df: pd.DataFrame,
+    output_dir: str,
+    skip_per_sample: bool = False,
+    site_data: Optional[dict] = None,
+    min_het_alt: int = 3,
+    sex_df: Optional[pd.DataFrame] = None,
+    preprocessed_depth_df: Optional[pd.DataFrame] = None,
+    baseline_df: Optional[pd.DataFrame] = None,
+) -> None:
+    """Generate aneuploidy-detection diagnostic plots."""
+    plot_training_loss_with_gradient(loss_df, output_dir)
+    plot_bin_variance_bias(bin_df, output_dir)
+    plot_chromosome_cn_heatmap(df, output_dir)
+    plot_chromosome_plq_heatmap(df, output_dir)
+    plot_binq_genome_profile(bin_df, output_dir)
+
+    all_vars = bin_df.groupby("sample")["sample_var"].first().values
+    sample_groups = {sample: sdf for sample, sdf in bin_df.groupby("sample", sort=False)}
+    baseline_metadata = _sample_baseline_ploidy_metadata(df, sex_df)
+    baseline_metadata.update(_baseline_metadata_from_manifest(baseline_df))
+    aneuploid_samples = [str(sample) for sample in df[df["is_aneuploid"]]["sample"].unique()]
+    non_diploid_samples = [
+        sample for sample, metadata in baseline_metadata.items()
+        if (
+            str(metadata.get("baseline_ploidy_type", "DIPLOID")) != "DIPLOID" or
+            int(metadata.get("autosomal_baseline_cn", 2)) != 2
+        )
+    ]
+    highlighted_samples = list(dict.fromkeys(aneuploid_samples + non_diploid_samples))
+    retained_highlighted_samples = [
+        sample for sample in highlighted_samples
+        if sample in sample_groups
+    ]
+    excluded_undetermined_samples = [
+        sample for sample, metadata in baseline_metadata.items()
+        if (
+            str(metadata.get("baseline_ploidy_type", "DIPLOID")) == "UNDETERMINED" and
+            sample not in sample_groups
+        )
+    ]
+    normal_samples = [
+        str(sample) for sample in sample_groups
+        if str(sample) not in set(retained_highlighted_samples)
+    ]
+
+    if skip_per_sample:
+        return
+
+    # Build a sample-name → index mapping for site data lookups
+    sample_idx_map: Optional[dict] = None
+    if site_data is not None and "sample_ids" in site_data:
+        sample_idx_map = {
+            str(s): i for i, s in enumerate(site_data["sample_ids"])
+        }
+
+    for idx, sid in enumerate(retained_highlighted_samples, start=1):
+        sdata = sample_groups.get(sid)
+        if sdata is None:
+            continue
+        sdf = df[df["sample"] == sid]
+        aneu_chrs = [
+            (r["chromosome"], r["copy_number"], r["mean_cn_probability"])
+            for _, r in sdf[sdf["is_aneuploid"]].iterrows()
+        ]
+        metadata = baseline_metadata.get(
+            str(sid),
+            {"baseline_ploidy_type": "DIPLOID", "autosomal_baseline_cn": 2},
+        )
+        plot_sample_with_variance(
+            sdata, all_vars, output_dir,
+            aneuploid_chrs=aneu_chrs,
+            baseline_ploidy_type=str(metadata.get("baseline_ploidy_type", "DIPLOID")),
+            autosomal_baseline_cn=int(metadata.get("autosomal_baseline_cn", 2)),
+            site_data=site_data,
+            sample_idx_map=sample_idx_map,
+            min_het_alt=min_het_alt,
+        )
+
+    if excluded_undetermined_samples and preprocessed_depth_df is None:
+        excluded_undetermined_samples = []
+
+    for idx, sid in enumerate(excluded_undetermined_samples, start=1):
+        sample_data = _sample_plot_data_from_preprocessed_depth(preprocessed_depth_df, sid)
+        if sample_data is None or sample_data.empty:
+            continue
+
+        metadata = baseline_metadata.get(
+            str(sid),
+            {"baseline_ploidy_type": "UNDETERMINED", "autosomal_baseline_cn": 0},
+        )
+        plot_sample_with_variance(
+            sample_data,
+            None,
+            output_dir,
+            baseline_ploidy_type=str(metadata.get("baseline_ploidy_type", "UNDETERMINED")),
+            autosomal_baseline_cn=int(metadata.get("autosomal_baseline_cn", 0)),
+            site_data=site_data,
+            sample_idx_map=sample_idx_map,
+            min_het_alt=min_het_alt,
+            detail_note="excluded from infer: raw depth/AF only",
+        )
+
+    for idx, sid in enumerate(normal_samples, start=1):
+        sdata = sample_groups.get(sid)
+        if sdata is None:
+            continue
+        metadata = baseline_metadata.get(
+            str(sid),
+            {"baseline_ploidy_type": "DIPLOID", "autosomal_baseline_cn": 2},
+        )
+        plot_sample_with_variance(
+            sdata, all_vars, output_dir,
+            baseline_ploidy_type=str(metadata.get("baseline_ploidy_type", "DIPLOID")),
+            autosomal_baseline_cn=int(metadata.get("autosomal_baseline_cn", 2)),
+            site_data=site_data,
+            sample_idx_map=sample_idx_map,
+            min_het_alt=min_het_alt,
+        )
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────────
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the plot subcommand."""
+    p = argparse.ArgumentParser(
+        description="Generate diagnostic and summary plots",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("-c", "--chrom-stats", required=True,
+                   help="chromosome_stats.tsv (from 'infer')")
+    p.add_argument("-o", "--output-dir", required=True)
+    p.add_argument("-b", "--bin-stats", default=None,
+                   help="bin_stats.tsv.gz (from 'infer')")
+    p.add_argument("-t", "--training-loss", default=None,
+                   help="training_loss.tsv (from 'infer')")
+    p.add_argument("-s", "--sex-assignments", default=None,
+                   help="aneuploidy_type_predictions.tsv (from 'call')")
+    p.add_argument(
+        "--autosomal-baseline-cn-tsv",
+        default=None,
+        help="sample_autosomal_baseline_cn.tsv (from 'polyploidy') to "
+             "preserve final baseline calls such as UNDETERMINED in plots "
+             "and the HTML report",
+    )
+    p.add_argument(
+        "--preprocessed-depth",
+        default=None,
+        help="preprocessed_depth.tsv (from 'preprocess'); required to render depth/AF-only sample plots for UNDETERMINED samples excluded from infer",
+    )
+    p.add_argument("--site-data", default=None,
+                   help="site_data.npz (from 'preprocess'); required for raw per-site AF panels")
+    p.add_argument(
+        "--site-af-estimates",
+        default=None,
+        help="site_af_estimates.tsv.gz (from 'infer') for site-level AF diagnostics",
+    )
+    p.add_argument("--min-het-alt", type=int, default=0,
+                   help="Minimum alt-allele read count to show a site in the AF scatter")
+    p.add_argument("--highlight-sample", default="",
+                   help="Sample ID to highlight in plots")
+    p.add_argument("--skip-per-sample-plots", action="store_true",
+                   help="Skip individual sample CN plots")
+    p.add_argument("--ppd-bin-summary", default=None,
+                   help="ppd_bin_summary.tsv.gz (from 'ppd')")
+    p.add_argument("--ppd-chr-summary", default=None,
+                   help="ppd_chromosome_summary.tsv (from 'ppd')")
+    p.add_argument("--ppd-bin-quality", default=None,
+                   help="ppd_bin_quality.tsv (from 'ppd') to add per-bin quality overlays and diagnostics")
+    p.add_argument("--binq-field", choices=BINQ_FIELD_OPTIONS, default="BINQ20",
+                   help="Per-bin quality field to use when --ppd-bin-quality is provided. "
+                        "Defaults to BINQ20. 'auto' prefers BINQ20 and falls back to CALLQ20")
+    p.add_argument("--ignored-bins", default=None,
+                   help="ignored_bins.tsv.gz (from 'call') to overlay bins removed during filtered calling")
+    p.add_argument(
+        "--pdf",
+        action="store_true",
+        help="Write figure artifacts as PDF instead of the default PNG. "
+             "The multi-page median depth summary remains PDF in either mode.",
+    )
+    return p.parse_args()
+
+
+def _run_plot(args: argparse.Namespace, logger) -> None:
+    """Generate plots after CLI logging is configured."""
+    with plot_output_format("pdf" if args.pdf else "png"):
+        apply_theme()
+
+        df = _apply_plot_depth_columns(pd.read_csv(args.chrom_stats, sep="\t"))
+        logger.info(
+            "Loaded chromosome statistics for plotting: rows=%d samples=%d",
+            len(df),
+            int(df["sample"].nunique()) if "sample" in df.columns else 0,
+        )
+
+        bin_df = None
+        if args.bin_stats:
+            bin_df = _apply_plot_depth_bin_columns(
+                pd.read_csv(args.bin_stats, sep="\t", compression="gzip")
+            )
+            logger.info("Loaded bin statistics for plotting: rows=%d", len(bin_df))
+            if args.ppd_bin_quality:
+                bin_quality_df = pd.read_csv(args.ppd_bin_quality, sep="\t")
+                bin_df = _annotate_binq_values(bin_df, bin_quality_df, args.binq_field)
+            if args.ignored_bins:
+                ignored_bins_df = pd.read_csv(args.ignored_bins, sep="\t")
+                bin_df = _annotate_ignored_bins(bin_df, ignored_bins_df)
+
+        # ── histograms ──────────────────────────────────────────────────────
+        logger.info("Generating cohort summary plots")
+        plot_histograms_by_chr_type(df, args.output_dir, args.highlight_sample)
+        plot_median_depth_distributions(df, args.output_dir, args.highlight_sample)
+        if args.site_af_estimates:
+            site_af_df = pd.read_csv(
+                args.site_af_estimates,
+                sep="\t",
+                compression="infer",
+            )
+            plot_site_af_estimates(site_af_df, args.output_dir)
+
+        # ── posterior predictive check plots ─────────────────────────────────
+        if args.ppd_bin_summary and args.ppd_chr_summary:
+            ppd_bin_df = pd.read_csv(args.ppd_bin_summary, sep="\t",
+                                     compression="gzip")
+            ppd_chr_df = pd.read_csv(args.ppd_chr_summary, sep="\t")
+            logger.info(
+                "Generating PPD plots: bin_rows=%d chromosome_rows=%d",
+                len(ppd_bin_df),
+                len(ppd_chr_df),
+            )
+            run_ppd_plots(ppd_bin_df, ppd_chr_df, args.output_dir,
+                          args.highlight_sample)
+
+        baseline_df = None
+        if args.autosomal_baseline_cn_tsv:
+            baseline_df = pd.read_csv(args.autosomal_baseline_cn_tsv, sep="\t")
+        preprocessed_depth_df = None
+        if args.preprocessed_depth:
+            preprocessed_depth_df = read_depth_tsv(args.preprocessed_depth)
+
+        # ── ploidy-style plots ──────────────────────────────────────────────
+        sex_df = None
+        if args.sex_assignments:
+            sex_df = pd.read_csv(args.sex_assignments, sep="\t")
+        else:
+            # Derive minimal sex_df from chromosome stats
+            from gatk_sv_ploidy.call import assign_sex_and_aneuploidy_types
+            sex_df = assign_sex_and_aneuploidy_types(df)
+        sex_df = _apply_plot_depth_sex_columns(sex_df, df)
+        sex_df = _apply_plot_baseline_manifest(sex_df, baseline_df)
+
+        _run_ploidy_plots(df, bin_df, sex_df, args.output_dir, args.highlight_sample)
+
+        # ── aneuploidy detection plots ──────────────────────────────────────
+        site_data = None
+        if args.site_data:
+            site_data = load_site_data(args.site_data)
+            logger.info("Loaded per-site allele tensors for plotting")
+
+        if args.bin_stats and args.training_loss:
+            loss_df = pd.read_csv(args.training_loss, sep="\t")
+            logger.info("Generating per-sample and training diagnostic plots")
+            _run_aneuploidy_plots(df, bin_df, loss_df, args.output_dir,
+                                  args.skip_per_sample_plots,
+                                  site_data=site_data,
+                                  min_het_alt=args.min_het_alt,
+                                  sex_df=sex_df,
+                                  preprocessed_depth_df=preprocessed_depth_df,
+                                  baseline_df=baseline_df)
+
+        write_plot_report(
+            args.output_dir,
+            chrom_df=df,
+            bin_df=bin_df,
+            sex_df=sex_df,
+            baseline_df=baseline_df,
+            highlight_sample=args.highlight_sample,
+        )
+        report_path = os.path.join(args.output_dir, "report", "index.html")
+        logger.info("Wrote static plot report")
+        log_output_artifacts(logger, [report_path])
+
+
+def main() -> None:
+    """Entry point for ``gatk-sv-ploidy plot``."""
+    args = parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+    with tool_logging_context(
+        tool_name="plot",
+        output_dir=args.output_dir,
+        args=args,
+    ) as logger:
+        _run_plot(args, logger)
+
+
+if __name__ == "__main__":
+    main()

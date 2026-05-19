@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gatk-sv-ploidy"
+version = "0.1.0"
+description = "Whole-genome aneuploidy detection from binned sequencing read counts and SNP allele counts"
+readme = "README.md"
+license = {text = "BSD-3-Clause"}
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pysam",
+    "torch",
+    "pyro-ppl",
+    "matplotlib",
+    "seaborn",
+    "scipy",
+    "scikit-learn",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "flake8",
+]
+
+[project.scripts]
+gatk-sv-ploidy = "gatk_sv_ploidy.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+markers = [
+    "integration: exercises multiple pipeline stages with filesystem artifacts",
+    "large: uses the larger real-data fixture and runs longer than the medium tier",
+]
+testpaths = ["tests"]

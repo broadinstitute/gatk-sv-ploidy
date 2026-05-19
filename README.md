@@ -178,57 +178,65 @@ If you use the end-to-end wrapper, pass plot options via
 ## Pipeline Architecture
 
 ```mermaid
-flowchart TD
-    subgraph Input
-        RD["Raw depth matrix\n(bins x samples)"]
-        SD["Site-depth files\n(.sd.txt.gz)"]
-    end
+graph TD
+  subgraph input["Input"]
+    rd["Raw depth matrix<br/>(bins x samples)"]
+    sd["Site-depth files<br/>(.sd.txt.gz)"]
+  end
 
-    subgraph "1. Preprocess"
-        N["Autosomal-median\nnormalization for QC"]
-        BF["Bin quality\nfiltering"]
-        AC["Per-site allele fraction\ncount assembly"]
-        RD --> N --> BF
-        SD -.-> AC
-        BF --> PD["preprocessed_depth.tsv"]
-        AC --> SN["site_data.npz"]
-    end
+  subgraph preprocess["1. Preprocess"]
+    norm["Autosomal-median<br/>normalization for QC"]
+    filt["Bin quality<br/>filtering"]
+    afbuild["Per-site allele fraction<br/>count assembly"]
+    pd["preprocessed_depth.tsv"]
+    sn["site_data.npz"]
+  end
 
-    subgraph "2. Baseline CN"
-        PB["Autosomal allele fraction\nbaseline classifier"]
-        PD --> PB
-        SN --> PB
-        PB --> AB["sample_autosomal_baseline_cn.tsv"]
-    end
+  subgraph baseline["2. Baseline CN"]
+    poly["Autosomal allele fraction<br/>baseline classifier"]
+    ab["sample_autosomal_baseline_cn.tsv"]
+  end
 
-    subgraph "3. Infer"
-        M["Bayesian CN model\n(Pyro)"]
-        SVI["SVI over continuous latents\nwith discrete CN enumeration"]
-        POST["Per-bin CN posterior\nand summaries"]
-        PD --> M
-        SN -.-> M
-        AB -.-> M
-        M --> SVI --> POST
-        POST --> IA["inference_artifacts.npz"]
-        POST --> BS["bin_stats.tsv.gz"]
-        POST --> CS["chromosome_stats.tsv"]
-    end
+  subgraph inferstep["3. Infer"]
+    model["Bayesian CN model<br/>(Pyro)"]
+    svi["SVI over continuous latents<br/>with discrete CN enumeration"]
+    post["Per-bin CN posterior<br/>and summaries"]
+    ia["inference_artifacts.npz"]
+    bs["bin_stats.tsv.gz"]
+    cs["chromosome_stats.tsv"]
+  end
 
-    subgraph "4. PPD"
-        PPD["Posterior predictive draws\nand quality summaries"]
-        PD --> PPD
-        SN -.-> PPD
-        IA --> PPD
-        PPD --> PQ["ppd_bin_quality.tsv"]
-        PPD --> PC["ppd_chromosome_summary.tsv"]
-    end
+  subgraph ppdstep["4. PPD"]
+    ppd["Posterior predictive draws<br/>and quality summaries"]
+    pq["ppd_bin_quality.tsv"]
+    pc["ppd_chromosome_summary.tsv"]
+  end
 
-    subgraph "5. Call"
-        CALL["Baseline-aware sex and\naneuploidy classification"]
-        CS --> CALL
-        PQ -.-> CALL
-        CALL --> PR["aneuploidy_type_predictions.tsv"]
-    end
+  subgraph callstep["5. Call"]
+    call["Baseline-aware sex and<br/>aneuploidy classification"]
+    pr["aneuploidy_type_predictions.tsv"]
+  end
+
+  rd --> norm --> filt --> pd
+  sd -.-> afbuild --> sn
+  pd --> poly
+  sn --> poly
+  poly --> ab
+  pd --> model
+  sn -.-> model
+  ab -.-> model
+  model --> svi --> post
+  post --> ia
+  post --> bs
+  post --> cs
+  pd --> ppd
+  sn -.-> ppd
+  ia --> ppd
+  ppd --> pq
+  ppd --> pc
+  cs --> call
+  pq -.-> call
+  call --> pr
 ```
 
 ## Current Defaults

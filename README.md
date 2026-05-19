@@ -276,7 +276,7 @@ as `site_alt`, `site_total`, `site_pop_af`, and `site_mask`.
 $$
 x^{\mathrm{norm}}_{bs} = \frac{2 x^{\mathrm{raw}}_{bs}}{m_s},
 \qquad
-m_s = \operatorname{median}\{x^{\mathrm{raw}}_{bs} : b \in \text{autosomes}\}.
+m_s = \mathrm{median}\{x^{\mathrm{raw}}_{bs} : b \in \text{autosomes}\}.
 $$
 
 That normalized view is used for bin filtering even when the written output is
@@ -450,7 +450,7 @@ The raw-count likelihood is negative-binomial-like with power-law extra-Poisson
 variance:
 
 $$
-\operatorname{Var}(Y_{bs}) = \mu_{bs} + V_{bs} \mu_{bs}^{\rho},
+\mathrm{Var}(Y_{bs}) = \mu_{bs} + V_{bs} \mu_{bs}^{\rho},
 $$
 
 with default $\rho = 1.5$. $V_{bs}$ is driven by the sample-specific variance

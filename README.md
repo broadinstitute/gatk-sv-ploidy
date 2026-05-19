@@ -213,7 +213,7 @@ graph TD
   end
 
   subgraph callstep["5. Call"]
-    call["Baseline-aware sex and<br/>aneuploidy classification"]
+    callnode["Baseline-aware sex and<br/>aneuploidy classification"]
     pr["aneuploidy_type_predictions.tsv"]
   end
 
@@ -234,9 +234,9 @@ graph TD
   ia --> ppd
   ppd --> pq
   ppd --> pc
-  cs --> call
-  pq -.-> call
-  call --> pr
+  cs --> callnode
+  pq -.-> callnode
+  callnode --> pr
 ```
 
 ## Current Defaults

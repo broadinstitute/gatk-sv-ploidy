@@ -239,19 +239,6 @@ graph TD
   callnode --> pr
 ```
 
-## Current Defaults
-
-| Component | Default | Meaning |
-|-----------|---------|---------|
-| `preprocess` output | raw counts | Filters are evaluated on normalized depth, but the written matrix is filtered raw counts |
-| `infer --autosome-prior-mode` | `dirichlet` | Strong per-bin neutral-state prior on autosomes |
-| SVI guide | `delta` | MAP-style continuous latent fit |
-| `infer sample depth anchor` | enabled | Raw-count runs fix sample depth to the autosomal median counts-per-kb anchor |
-| `infer --epsilon-mean` | `1e-2` | Small CN0-only epsilon background floor is retained |
-| `infer --af-weight` | `0.5` | Prior median for the learned global allele fraction informative-mixture probability |
-| `infer allele fraction temperature learning` | enabled when allele fraction evidence is active | A single global allele fraction temperature is learned by default |
-| `infer --cn-inference-method` | `multi-draw` | With the default delta guide, discrete CN inference uses the fitted point estimate |
-
 ## Objective And Decision Target
 
 The model's operational target is per-bin discrete copy number

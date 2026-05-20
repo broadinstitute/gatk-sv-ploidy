@@ -54,7 +54,7 @@ def _chrom_row(
         "sample": sample,
         "chromosome": chromosome,
         "copy_number": copy_number,
-        "mean_cn_probability": prob,
+        "coverage_score": prob,
         "plq": plq,
         "is_aneuploid": is_aneuploid,
         "n_bins": 10,
@@ -85,7 +85,7 @@ def _write_run(
         index=False,
     )
     pd.DataFrame(chrom_rows).to_csv(
-        root / "infer" / "chromosome_stats.tsv",
+        root / "call" / "chromosome_stats.tsv",
         sep="\t",
         index=False,
     )
@@ -122,7 +122,7 @@ def test_default_batch_labels_are_stable_for_duplicate_names() -> None:
     assert labels == ["run", "run_2", "next"]
 
 
-def test_load_run_prefers_filtered_chromosome_stats(tmp_path) -> None:
+def test_load_run_uses_called_chromosome_stats(tmp_path) -> None:
     run_dir = tmp_path / "run"
     _write_run(
         run_dir,
@@ -142,7 +142,30 @@ def test_load_run_prefers_filtered_chromosome_stats(tmp_path) -> None:
     )
 
     assert run.used_filtered_chrom_stats is True
-    assert run.chrom_stats_source.name == "chromosome_stats.filtered.tsv"
+    assert run.chrom_stats_source == run_dir / "call" / "chromosome_stats.tsv"
+
+
+def test_load_run_rejects_legacy_score_column(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    legacy_rows = []
+    legacy_column = "mean" + "_cn_probability"
+    for row in _basic_chrom_rows("S1"):
+        legacy_row = dict(row)
+        legacy_row[legacy_column] = legacy_row.pop("coverage_score")
+        legacy_rows.append(legacy_row)
+    _write_run(
+        run_dir,
+        [_prediction_row("S1")],
+        legacy_rows,
+    )
+
+    with pytest.raises(ValueError, match="coverage_score"):
+        aggregate._load_run_data(
+            run_dir,
+            batch_id=1,
+            batch_label="batch",
+            binq_field="auto",
+        )
 
 
 def test_build_batch_inventory_rows_uses_sample_count(tmp_path) -> None:
@@ -344,7 +367,7 @@ def test_build_report_tables_classifies_requested_sections(tmp_path) -> None:
     low_event = event_df[event_df["category"] == "low_confidence_aneuploidy"].iloc[0]
     assert low_event["sample"] == "S3"
     assert low_event["chromosome"] == "chr21"
-    assert low_event["mean_cn_probability"] == pytest.approx(0.42)
+    assert low_event["coverage_score"] == pytest.approx(0.42)
     assert missing_df["artifact"].isin(["bin_stats", "site_data", "polyploidy_manifest"]).any()
 
 
@@ -478,7 +501,7 @@ def test_build_appendix_field_guide_documents_displayed_tables() -> None:
     assert "Sample count" in displayed_labels
     assert "Median normalized depth" in displayed_labels
     assert "Stats source" not in displayed_labels
-    assert "mean_cn_probability" in definitions
+    assert "coverage_score" in definitions
 
 
 def test_add_pdf_internal_links_appends_goto_annotations() -> None:
@@ -592,8 +615,8 @@ def test_draw_kv_block_wraps_long_case_identifiers() -> None:
 def test_format_contigs_uses_score_label() -> None:
     events = pd.DataFrame(
         [
-            {"chromosome": "chr21", "copy_number": 3, "mean_cn_probability": 0.42},
-            {"chromosome": "chrX", "copy_number": 1, "mean_cn_probability": 0.97},
+            {"chromosome": "chr21", "copy_number": 3, "coverage_score": 0.42},
+            {"chromosome": "chrX", "copy_number": 1, "coverage_score": 0.97},
         ]
     )
 

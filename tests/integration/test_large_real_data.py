@@ -70,7 +70,8 @@ def test_large_real_fixture_runs_preprocess_and_infer(
     chromosome_stats = pd.read_csv(infer_out / "chromosome_stats.tsv", sep="\t")
     assert chromosome_stats["sample"].nunique() == len(large_expected_truth)
     assert chromosome_stats["chromosome"].nunique() == 5
-    assert chromosome_stats["mean_cn_probability"].between(0.0, 1.0).all()
+    assert chromosome_stats["coverage_score"].between(0.0, 1.0).all()
+    assert "is_aneuploid" not in chromosome_stats.columns
     assert (infer_out / "inference_artifacts.npz").exists()
 
     call_out = tmp_path / "call"
@@ -88,6 +89,9 @@ def test_large_real_fixture_runs_preprocess_and_infer(
         ],
     )
     call.main()
+
+    called_chromosome_stats = pd.read_csv(call_out / "chromosome_stats.tsv", sep="\t")
+    assert "is_aneuploid" in called_chromosome_stats.columns
 
     pred_df = pd.read_csv(call_out / "aneuploidy_type_predictions.tsv", sep="\t")
     assert pred_df.set_index("sample")["predicted_aneuploidy_type"].to_dict() == large_expected_truth

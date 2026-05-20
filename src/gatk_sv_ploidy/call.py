@@ -1,9 +1,10 @@
 """
 Call subcommand — assign sex karyotype and aneuploidy type.
 
-Reads ``chromosome_stats.tsv`` (output of ``infer``), classifies each sample's
-sex from chrX/chrY copy numbers, predicts an aneuploidy type, and writes
-sex-assignment and aneuploid-sample tables.
+Reads ``chromosome_stats.tsv`` (output of ``infer``), calls chromosome-level
+aneuploidies, classifies each sample's sex from chrX/chrY copy numbers,
+predicts an aneuploidy type, and writes sex-assignment and aneuploid-sample
+tables.
 """
 
 from __future__ import annotations
@@ -161,7 +162,7 @@ def _resolve_allosome_copy_numbers(
     prob_map = dict(
         zip(
             sdf["chromosome"],
-            sdf["mean_cn_probability"].fillna(0.0),
+            sdf["coverage_score"].fillna(0.0),
         )
     )
     x_ok = ("chrX" not in prob_map) or (float(prob_map["chrX"]) > prob_threshold)
@@ -219,7 +220,7 @@ def _aggregate_bin_stats_to_chromosome_stats(bin_df: pd.DataFrame) -> pd.DataFra
             chr_cnq = compute_cnq_from_probabilities(
                 sdf[_CN_PROB_COLUMNS].to_numpy(dtype=np.float64),
             )
-        copy_number, mean_cn_probability, ploidy_fractions, plq = summarize_contig_ploidy_from_bin_calls(
+        copy_number, coverage_score, ploidy_fractions, plq = summarize_contig_ploidy_from_bin_calls(
             chr_cn_map,
             chr_cnq,
             n_states=len(_CN_PROB_COLUMNS),
@@ -229,7 +230,7 @@ def _aggregate_bin_stats_to_chromosome_stats(bin_df: pd.DataFrame) -> pd.DataFra
             "sample": sample_id,
             "chromosome": chrom,
             "copy_number": copy_number,
-            "mean_cn_probability": mean_cn_probability,
+            "coverage_score": coverage_score,
             "plq": plq,
             "n_bins": int(len(sdf)),
             "mean_depth": float(sdf["observed_depth"].mean()),
@@ -297,7 +298,7 @@ def _annotate_aneuploidy_flags(
         prob_map = dict(
             zip(
                 sdf["chromosome"],
-                sdf["mean_cn_probability"].fillna(0.0),
+                sdf["coverage_score"].fillna(0.0),
             )
         )
         autosomal_baseline_cn = 2
@@ -308,7 +309,7 @@ def _annotate_aneuploidy_flags(
 
         auto_mask = ~sdf["chromosome"].isin(_SEX_CHROMS)
         auto_aneu = auto_mask & (sdf["copy_number"] != autosomal_baseline_cn)
-        auto_aneu &= sdf["mean_cn_probability"].fillna(0.0) > prob_threshold
+        auto_aneu &= sdf["coverage_score"].fillna(0.0) > prob_threshold
         out.loc[sdf.index[auto_aneu], "is_aneuploid"] = True
 
         x_cn = int(cn_map.get("chrX", 2))
@@ -476,7 +477,7 @@ def _apply_binq_filter_to_annotated_bins(
     replacement_mask = retained_mask & ~sex_conflict_mask
     replacement_pairs = [
         ("copy_number", "copy_number_filtered"),
-        ("mean_cn_probability", "mean_cn_probability_filtered"),
+        ("coverage_score", "coverage_score_filtered"),
         ("plq", "plq_filtered"),
         ("n_bins", "n_bins_filtered"),
         ("mean_depth", "mean_depth_filtered"),
@@ -520,7 +521,7 @@ def _apply_binq_filter_to_annotated_bins(
         ~out["chromosome"].isin(_SEX_CHROMS)
     )
     out.loc[missing_auto_mask, "copy_number"] = 2
-    out.loc[missing_auto_mask, "mean_cn_probability"] = np.nan
+    out.loc[missing_auto_mask, "coverage_score"] = np.nan
     if "plq" in out.columns:
         out.loc[missing_auto_mask, "plq"] = np.nan
     for col in _PLOIDY_PROB_COLUMNS:
@@ -609,9 +610,9 @@ def assign_sex_and_aneuploidy_types(
     Aneuploidy type is inferred from the set of aneuploid chromosomes.
 
     Args:
-        df: ``chromosome_stats.tsv`` DataFrame with columns ``sample``,
+        df: called chromosome stats DataFrame with columns ``sample``,
             ``chromosome``, ``copy_number``, ``is_aneuploid``,
-            ``mean_cn_probability``, ``median_depth``.
+            ``coverage_score``, ``median_depth``.
         truth_dict: Optional mapping of sample ID → true aneuploidy type.
 
     Returns:
@@ -648,9 +649,9 @@ def assign_sex_and_aneuploidy_types(
         cn_map["chrX"] = x_cn
         cn_map["chrY"] = y_cn
         aneu_map = {
-            chrom: bool(cn != autosomal_baseline_cn)
-            for chrom, cn in cn_map.items()
-            if chrom not in _SEX_CHROMS
+            str(row["chromosome"]): bool(row["is_aneuploid"])
+            for _, row in sdf.iterrows()
+            if str(row["chromosome"]) not in _SEX_CHROMS
         }
 
         raw_x_cn = raw_cn_map.get("chrX", 2)
@@ -703,7 +704,7 @@ def assign_sex_and_aneuploidy_types(
                 "autosomal_aneuploidy_type": autosomal_aneuploidy_type,
                 "allosomal_aneuploidy_type": allosomal_aneuploidy_type,
                 "predicted_aneuploidy_type": pred_type,
-                "score": _safe_min_probability(sdf["mean_cn_probability"]),
+                "score": _safe_min_probability(sdf["coverage_score"]),
             }
         )
 
@@ -940,7 +941,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--prob-threshold", type=float, default=0.8,
-        help="Minimum mean chromosome CN probability used when rebuilding aneuploid flags from filtered bins.",
+        help="Minimum coverage score used for chromosome-level aneuploid calls.",
     )
     return p.parse_args()
 
@@ -957,6 +958,7 @@ def _run_call(args: argparse.Namespace, logger) -> None:
         len(df),
         int(df["sample"].nunique()) if "sample" in df.columns else 0,
     )
+    df = _annotate_aneuploidy_flags(df, prob_threshold=args.prob_threshold)
 
     annotated_bin_df: pd.DataFrame | None = None
     output_artifacts: list[str] = []
@@ -1005,6 +1007,11 @@ def _run_call(args: argparse.Namespace, logger) -> None:
         if annotated_bin_df is not None:
             annotated_bin_df = annotated_bin_df[~annotated_bin_df["sample"].isin(excl)].copy()
         logger.info("Applied exclusion list: excluded_samples=%d", len(excl))
+
+    called_chrom_path = os.path.join(args.output_dir, "chromosome_stats.tsv")
+    df.to_csv(called_chrom_path, sep="\t", index=False)
+    output_artifacts.append(called_chrom_path)
+    logger.info("Wrote called chromosome statistics")
 
     if annotated_bin_df is not None:
         ignored_path = os.path.join(args.output_dir, "ignored_bins.tsv.gz")

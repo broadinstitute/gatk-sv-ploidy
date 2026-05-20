@@ -50,7 +50,8 @@ def test_medium_real_fixture_runs_infer_call_and_eval(
         "chrX",
         "chrY",
     ]
-    assert chromosome_stats["mean_cn_probability"].between(0.0, 1.0).all()
+    assert chromosome_stats["coverage_score"].between(0.0, 1.0).all()
+    assert "is_aneuploid" not in chromosome_stats.columns
 
     call_out = tmp_path / "call"
     monkeypatch.setattr(
@@ -67,6 +68,9 @@ def test_medium_real_fixture_runs_infer_call_and_eval(
         ],
     )
     call.main()
+
+    called_chromosome_stats = pd.read_csv(call_out / "chromosome_stats.tsv", sep="\t")
+    assert "is_aneuploid" in called_chromosome_stats.columns
 
     pred_df = pd.read_csv(call_out / "aneuploidy_type_predictions.tsv", sep="\t")
     assert pred_df["sample"].tolist() == sorted(medium_expected_truth)

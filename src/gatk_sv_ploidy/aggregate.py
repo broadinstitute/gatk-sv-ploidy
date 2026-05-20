@@ -40,7 +40,7 @@ _REQUIRED_CHROM_COLUMNS = {
     "sample",
     "chromosome",
     "copy_number",
-    "mean_cn_probability",
+    "coverage_score",
     "plq",
     "is_aneuploid",
 }
@@ -55,7 +55,7 @@ _EVENT_COLUMNS = [
     "copy_number",
     "expected_copy_number",
     "copy_number_delta",
-    "mean_cn_probability",
+    "coverage_score",
     "plq",
     "n_bins",
     "frac_bins_retained",
@@ -177,7 +177,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help=(
-            "Fallback mean CN probability threshold used when a batch's call "
+            "Fallback coverage score threshold used when a batch's call "
             "cutoff cannot be recovered from call.log"
         ),
     )
@@ -403,12 +403,12 @@ def _load_run_data(
     pred_df = _read_tsv(pred_path)
     _validate_columns(pred_df, _REQUIRED_PREDICTION_COLUMNS, pred_path)
 
+    called_path = root / "call" / "chromosome_stats.tsv"
     filtered_path = root / "call" / "chromosome_stats.filtered.tsv"
-    infer_path = root / "infer" / "chromosome_stats.tsv"
-    chrom_path = filtered_path if filtered_path.exists() else infer_path
+    chrom_path = called_path if called_path.exists() else filtered_path
     if not chrom_path.exists():
         raise FileNotFoundError(
-            f"Missing required chromosome stats file: {filtered_path} or {infer_path}"
+            f"Missing required called chromosome stats file: {called_path} or {filtered_path}"
         )
     chrom_df = _read_tsv(chrom_path)
     _validate_columns(chrom_df, _REQUIRED_CHROM_COLUMNS, chrom_path)
@@ -427,7 +427,7 @@ def _load_run_data(
         pred_df=pred_df,
         chrom_df=chrom_df,
         chrom_stats_source=chrom_path,
-        used_filtered_chrom_stats=chrom_path == filtered_path,
+        used_filtered_chrom_stats=filtered_path.exists(),
         baseline_df=baseline_df,
         bin_df=bin_df,
         site_data=site_data,
@@ -588,8 +588,8 @@ def _build_chrom_table(runs: list[RunData]) -> pd.DataFrame:
         errors="coerce",
     ).fillna(2).astype(int)
     chrom_df["copy_number"] = pd.to_numeric(chrom_df["copy_number"], errors="coerce")
-    chrom_df["mean_cn_probability"] = pd.to_numeric(
-        chrom_df["mean_cn_probability"],
+    chrom_df["coverage_score"] = pd.to_numeric(
+        chrom_df["coverage_score"],
         errors="coerce",
     )
     chrom_df["plq"] = pd.to_numeric(chrom_df["plq"], errors="coerce")
@@ -692,7 +692,7 @@ def _format_contigs(events: pd.DataFrame) -> str:
         return ""
     parts: list[str] = []
     for _, event in events.sort_values(["chromosome", "copy_number"]).iterrows():
-        prob = event.get("mean_cn_probability")
+        prob = event.get("coverage_score")
         prob_text = "nan" if pd.isna(prob) else f"{float(prob):.3f}"
         parts.append(f"{event['chromosome']}:CN{int(event['copy_number'])} score={prob_text}")
     return "; ".join(parts)
@@ -717,7 +717,7 @@ def _build_event_table(
         batch_key = (int(row["batch_id"]), str(row["batch_label"]))
         prob_threshold = threshold_by_batch.get(batch_key, fallback_prob_threshold)
         is_autosome = chrom not in _SEX_CHROMS
-        prob = row.get("mean_cn_probability")
+        prob = row.get("coverage_score")
         is_above_threshold = pd.notna(prob) and float(prob) > prob_threshold
         is_confident = bool(row.get("is_aneuploid", False)) and is_above_threshold
         is_low_conf = bool(
@@ -749,7 +749,7 @@ def _build_event_table(
                 "copy_number": row.get("copy_number"),
                 "expected_copy_number": row.get("expected_copy_number"),
                 "copy_number_delta": row.get("copy_number_delta"),
-                "mean_cn_probability": row.get("mean_cn_probability"),
+                "coverage_score": row.get("coverage_score"),
                 "plq": row.get("plq"),
                 "n_bins": row.get("n_bins", np.nan),
                 "frac_bins_retained": row.get("frac_bins_retained", np.nan),
@@ -1579,7 +1579,7 @@ def _build_appendix_field_guide() -> pd.DataFrame:
             "displayed_label": "Call cutoff",
             "definition": (
                 "Effective per-batch probability threshold used to flag low-confidence "
-                "contigs when mean_cn_probability is at or below the cutoff."
+                "contigs when coverage_score is at or below the cutoff."
             ),
         },
         {
@@ -1655,7 +1655,7 @@ def _build_appendix_field_guide() -> pd.DataFrame:
             "displayed_label": "Low-confidence events",
             "definition": (
                 "Total number of contig-level low-confidence events, where copy number "
-                "differs from expected and mean_cn_probability is at or below the call cutoff."
+                "differs from expected and coverage_score is at or below the call cutoff."
             ),
         },
         {
@@ -1699,7 +1699,7 @@ def _build_appendix_field_guide() -> pd.DataFrame:
             "displayed_label": "Anomalous contigs",
             "definition": (
                 "Compact per-contig summary formatted as <chromosome>:CN<copy_number> "
-                "score=<mean_cn_probability> for reportable events in that case."
+                "score=<coverage_score> for reportable events in that case."
             ),
         },
         {
@@ -1747,7 +1747,7 @@ def _build_appendix_field_guide() -> pd.DataFrame:
             "displayed_label": "Score",
             "definition": (
                 "Sample-level score, computed as the minimum contig-level "
-                "mean_cn_probability across the sample's chromosome summaries."
+                "coverage_score across the sample's chromosome summaries."
             ),
         },
         {
@@ -1811,7 +1811,7 @@ def _build_appendix_field_guide() -> pd.DataFrame:
         {
             "display_element": "Anomalous Contig Evidence",
             "displayed_label": "Score",
-            "definition": "Contig-level mean_cn_probability for the displayed copy-number call.",
+            "definition": "Contig-level coverage_score for the displayed copy-number call.",
         },
         {
             "display_element": "Anomalous Contig Evidence",
@@ -2110,7 +2110,7 @@ def _plan_case_page_count(
         fig, _ = _plan_table_across_pages(
             pdf_state,
             events,
-            ["chromosome", "copy_number", "mean_cn_probability", "plq", "median_depth"],
+            ["chromosome", "copy_number", "coverage_score", "plq", "median_depth"],
             page_header=f"Section {section_number}  \u2022  {section_title}",
             section_title=f"{case['sample']} \u2014 Anomalous Contig Evidence",
             eyebrow="Events",
@@ -2123,7 +2123,7 @@ def _plan_case_page_count(
             column_labels={
                 "chromosome": "Chrom",
                 "copy_number": "CN",
-                "mean_cn_probability": "Score",
+                "coverage_score": "Score",
                 "plq": "PLQ",
                 "median_depth": "Median normalized depth",
             },
@@ -2595,9 +2595,9 @@ def _generate_sample_plot_image(
         if "plq" in row.index and pd.notna(row["plq"])
     }
     aneuploid_chrs = [
-        (str(row["chromosome"]), int(row["copy_number"]), float(row["mean_cn_probability"]))
+        (str(row["chromosome"]), int(row["copy_number"]), float(row["coverage_score"]))
         for _, row in event_rows.iterrows()
-        if pd.notna(row.get("copy_number")) and pd.notna(row.get("mean_cn_probability"))
+        if pd.notna(row.get("copy_number")) and pd.notna(row.get("coverage_score"))
     ]
     if logger is not None:
         logger.info(
@@ -2736,7 +2736,7 @@ def _add_case_page(
             pdf,
             pdf_state,
             events,
-            ["chromosome", "copy_number", "mean_cn_probability", "plq", "median_depth"],
+            ["chromosome", "copy_number", "coverage_score", "plq", "median_depth"],
             page_header=f"Section {section_number}  \u2022  {section_title}",
             section_title=f"{case['sample']} \u2014 Anomalous Contig Evidence",
             eyebrow="Events",
@@ -2749,7 +2749,7 @@ def _add_case_page(
             column_labels={
                 "chromosome": "Chrom",
                 "copy_number": "CN",
-                "mean_cn_probability": "Score",
+                "coverage_score": "Score",
                 "plq": "PLQ",
                 "median_depth": "Median normalized depth",
             },

@@ -14,7 +14,6 @@ from gatk_sv_ploidy.infer import (
     build_site_af_estimates,
     build_bin_stats,
     build_chromosome_stats,
-    detect_aneuploidies,
     estimate_site_pop_af_naive_bayes,
     parse_args,
     resolve_site_af_estimator_application,
@@ -1099,9 +1098,9 @@ def test_build_chromosome_stats_includes_plot_normalized_depth_for_raw_model() -
             "autosomal_baseline_cn": np.array([3], dtype=np.int64),
         },
         cn_posterior={"cn_posterior": cn_posterior},
-        aneuploid_map={0: []},
     )
 
+    assert "is_aneuploid" not in chr_df.columns
     assert "plot_mean_depth" in chr_df.columns
     assert "plot_median_depth" in chr_df.columns
     assert "plq" in chr_df.columns
@@ -1144,76 +1143,10 @@ def test_build_chromosome_stats_uses_majority_vote_and_average_cnq() -> None:
             "sample_var": np.full(depth_df.n_samples, 0.03, dtype=np.float32),
         },
         cn_posterior={"cn_posterior": cn_posterior, "cnq": cnq},
-        aneuploid_map={0: [("chr21", 3, 2.0 / 3.0)]},
     )
 
     row = chr_df.iloc[0]
     assert int(row["copy_number"]) == 3
-    assert float(row["mean_cn_probability"]) == pytest.approx(2.0 / 3.0)
+    assert float(row["coverage_score"]) == pytest.approx(2.0 / 3.0)
     assert int(row["plq"]) == 30
     assert float(row["ploidy_prob_3"]) == pytest.approx(2.0 / 3.0)
-
-
-def test_detect_aneuploidies_uses_autosomal_baseline_cn() -> None:
-    depth_df = DepthData(
-        pd.DataFrame(
-            {
-                "Chr": ["chr21"],
-                "Start": [0],
-                "End": [1000],
-                "S1": np.array([3.0], dtype=np.float32),
-            },
-            index=["chr21:0-1000"],
-        ),
-        device="cpu",
-    )
-    cn_posterior = np.zeros((depth_df.n_bins, depth_df.n_samples, 6), dtype=np.float32)
-    cn_posterior[0, 0, 3] = 1.0
-
-    default_calls = detect_aneuploidies(
-        depth_df,
-        {"cn_posterior": cn_posterior},
-        prob_threshold=0.5,
-    )
-    triploid_calls = detect_aneuploidies(
-        depth_df,
-        {"cn_posterior": cn_posterior},
-        prob_threshold=0.5,
-        autosomal_baseline_cn=np.array([3], dtype=np.int64),
-    )
-
-    assert default_calls[0] == [("chr21", 3, 1.0)]
-    assert triploid_calls[0] == []
-
-
-def test_detect_aneuploidies_uses_baseline_aware_allosomes() -> None:
-    depth_df = DepthData(
-        pd.DataFrame(
-            {
-                "Chr": ["chrX", "chrY"],
-                "Start": [0, 0],
-                "End": [1000, 1000],
-                "S1": np.array([2.0, 1.0], dtype=np.float32),
-            },
-            index=["chrX:0-1000", "chrY:0-1000"],
-        ),
-        device="cpu",
-    )
-    cn_posterior = np.zeros((depth_df.n_bins, depth_df.n_samples, 6), dtype=np.float32)
-    cn_posterior[0, 0, 2] = 1.0
-    cn_posterior[1, 0, 1] = 1.0
-
-    diploid_calls = detect_aneuploidies(
-        depth_df,
-        {"cn_posterior": cn_posterior},
-        prob_threshold=0.5,
-    )
-    triploid_calls = detect_aneuploidies(
-        depth_df,
-        {"cn_posterior": cn_posterior},
-        prob_threshold=0.5,
-        autosomal_baseline_cn=np.array([3], dtype=np.int64),
-    )
-
-    assert diploid_calls[0] == [("chrX", 2, 1.0), ("chrY", 1, 1.0)]
-    assert triploid_calls[0] == []

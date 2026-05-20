@@ -49,7 +49,7 @@ gatk-sv-ploidy <subcommand> [options]
 | `polyploidy` | Classify per-sample autosomal baseline CN from pooled autosomal allele fraction evidence |
 | `infer` | Fit the Bayesian CN model and write per-bin and per-chromosome summaries |
 | `ppd` | Generate posterior predictive draws and quality / calibration summaries |
-| `call` | Assign baseline-aware sex and aneuploidy labels per sample |
+| `call` | Call chromosome-level aneuploidies and assign baseline-aware sample labels |
 | `plot` | Generate diagnostic plots and a static HTML report |
 | `aggregate` | Combine one or more wrapper work directories into one PDF review report |
 | `eval` | Evaluate predictions against a truth set |
@@ -85,7 +85,7 @@ gatk-sv-ploidy ppd -i out/preprocess/preprocessed_depth.tsv \
   --site-data out/preprocess/site_data.npz \
   -o out/ppd
 
-# 5. Convert chromosome summaries into sample-level labels.
+# 5. Convert chromosome summaries into chromosome- and sample-level calls.
 # --min-binq is optional. It removes low-quality bins before rebuilding
 # chromosome summaries and final labels.
 gatk-sv-ploidy call -c out/infer/chromosome_stats.tsv \
@@ -95,7 +95,7 @@ gatk-sv-ploidy call -c out/infer/chromosome_stats.tsv \
   -o out/call
 
 # 6. Generate plots and the static report.
-gatk-sv-ploidy plot -c out/call/chromosome_stats.filtered.tsv \
+gatk-sv-ploidy plot -c out/call/chromosome_stats.tsv \
   --sex-assignments out/call/aneuploidy_type_predictions.tsv \
   --autosomal-baseline-cn-tsv out/polyploidy/sample_autosomal_baseline_cn.tsv \
   --preprocessed-depth out/preprocess/preprocessed_depth.tsv \
@@ -153,9 +153,9 @@ the log. Machine-readable output files remain separate from diagnostics.
 |------|-------------|
 | `preprocess` | `preprocess.log`, `preprocessed_depth.tsv`, optional `site_data.npz` |
 | `polyploidy` | `polyploidy.log`, `polyploidy_test_results.tsv`, `sample_autosomal_baseline_cn.tsv`, optional diagnostics under `diagnostics/` |
-| `infer` | `infer.log`, `training_loss.tsv`, `safe_inference_diagnostics.txt`, `inference_artifacts.npz`, `bin_stats.tsv.gz`, `chromosome_stats.tsv`, `sample_autosomal_baseline_cn.tsv`, optional `site_af_estimates.tsv.gz` |
+| `infer` | `infer.log`, `training_loss.tsv`, `safe_inference_diagnostics.txt`, `inference_artifacts.npz`, `bin_stats.tsv.gz`, neutral `chromosome_stats.tsv`, `sample_autosomal_baseline_cn.tsv`, optional `site_af_estimates.tsv.gz` |
 | `ppd` | `ppd.log`, `ppd_draws.npz`, `ppd_bin_summary.tsv.gz`, `ppd_bin_quality.tsv`, `ppd_chromosome_summary.tsv`, `ppd_global_summary.tsv` |
-| `call` | `call.log`, `sex_assignments.txt.gz`, `aneuploidy_type_predictions.tsv`, `aneuploid_samples.tsv`, optional `chromosome_stats.filtered.tsv` and `ignored_bins.tsv.gz` when BINQ filtering is used |
+| `call` | `call.log`, `chromosome_stats.tsv`, `sex_assignments.txt.gz`, `aneuploidy_type_predictions.tsv`, `aneuploid_samples.tsv`, optional `chromosome_stats.filtered.tsv` and `ignored_bins.tsv.gz` when BINQ filtering is used |
 | `plot` | `plot.log`, `plot_manifest.tsv`, `report/index.html`, linked plot and table artifacts |
 | `aggregate` | `aggregate.log`, `aggregate_report.pdf`, `aggregate_summary.tsv`, `aggregate_cases.tsv`, `aggregate_contig_events.tsv`, `aggregate_missing_artifacts.tsv` |
 | `eval` | `eval.log`, `metrics_report.txt`, `predictions_with_truth.tsv` |
@@ -195,8 +195,7 @@ gatk-sv-ploidy aggregate batch_001 batch_002 batch_003 \
 ```
 
 The tool reads sample-level calls from `call/aneuploidy_type_predictions.tsv`
-and chromosome-level metrics from `call/chromosome_stats.filtered.tsv` when
-available, otherwise `infer/chromosome_stats.tsv`. Optional artifacts such as
+and chromosome-level calls from `call/chromosome_stats.tsv`. Optional artifacts such as
 `infer/bin_stats.tsv.gz`, `preprocess/site_data.npz`,
 `polyploidy/sample_autosomal_baseline_cn.tsv`, `call/ignored_bins.tsv.gz`, and
 `ppd/ppd_bin_quality.tsv` are used when present and recorded as missing when
@@ -206,12 +205,12 @@ The PDF contains a run/provenance summary, summary counts, a case index, and
 sample-focused sections for confident sex aneuploidies, confident polyploidy,
 confident autosomal aneuploidy, and low-confidence aneuploidies. A
 low-confidence aneuploidy is a contig whose copy number differs from the
-expected baseline but whose `mean_cn_probability` is at or below
+expected baseline but whose `coverage_score` is at or below
 `--prob-threshold` (default 0.5), excluding contigs already marked as confident
 aneuploidies.
 
 The report includes review metrics for each case: anomalous contigs, copy
-number, expected copy number, `mean_cn_probability`, PLQ, sample score, sample
+number, expected copy number, `coverage_score`, PLQ, sample score, sample
 depth ratio and batch percentile, sample overdispersion and batch percentile,
 retained-bin fraction when available, truth labels when present, and optional
 sample diagnostic plots when per-bin statistics are available.
@@ -603,8 +602,11 @@ The pipeline exposes multiple confidence outputs rather than a single hard call:
 - `site_af_estimates.tsv.gz`, when written, records input, naive-Bayes, and
   effective site allele-frequency estimates used by `infer`.
 - `bin_stats.tsv.gz` contains per-bin CN summaries and quality metrics.
-- `chromosome_stats.tsv` contains chromosome-level CN, mean posterior support,
-  ploidy fractions, and the fixed autosomal baseline CN used for that sample.
+- `infer/chromosome_stats.tsv` contains chromosome-level CN, mean posterior
+  support, ploidy fractions, and the fixed autosomal baseline CN used for that
+  sample. It is evidence, not an aneuploidy call table.
+- `call/chromosome_stats.tsv` adds final chromosome-level aneuploid flags after
+  applying the call-stage coverage score threshold and any BINQ filtering.
 - `ppd_bin_quality.tsv` provides PPD-derived BINQ and CALLQ metrics.
 - `aneuploid_samples.tsv` contains chromosome rows marked aneuploid after the
   final calling step.
@@ -648,7 +650,7 @@ of chromosomal abnormalities:
   baseline state, an autosomal chromosome deviation, a sex-chromosome deviation,
   or a combination.
 
-3. Use `chromosome_stats.tsv` to inspect the evidence behind a sample-level
+3. Use `call/chromosome_stats.tsv` to inspect the evidence behind a sample-level
   label. For autosomes, compare `copy_number` with `autosomal_baseline_cn`.
   A diploid-baseline sample is usually abnormal when an autosome is not CN2; a
   triploid-baseline sample is usually abnormal when an autosome is not CN3.
@@ -656,7 +658,7 @@ of chromosomal abnormalities:
   and are summarized in the `sex` and `allosomal_aneuploidy_type` fields.
 
 4. Use posterior probabilities and quality scores to decide whether a call is
-  strong enough for follow-up. `mean_cn_probability`, `ploidy_prob_*`, `cnq`,
+  strong enough for follow-up. `coverage_score`, `ploidy_prob_*`, `cnq`,
   and `plq` summarize posterior support. CNQ is approximately
   $-10\log_{10}(1 - (p_1 - p_2))$, where $p_1$ and $p_2$ are the largest and
   second-largest CN posterior probabilities, so larger values mean a clearer

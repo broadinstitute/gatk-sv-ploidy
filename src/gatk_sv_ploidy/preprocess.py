@@ -948,7 +948,7 @@ def build_per_site_data(
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the preprocess subcommand."""
     p = argparse.ArgumentParser(
-        description="Preprocess depth data for aneuploidy inference",
+        description="Preprocess depth data for copy-number inference",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(

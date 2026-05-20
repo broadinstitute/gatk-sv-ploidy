@@ -86,7 +86,7 @@ def test_plot_pipeline_runs_on_medium_fixture(
         [
             "gatk-sv-ploidy plot",
             "--chrom-stats",
-            str(infer_out / "chromosome_stats.tsv"),
+            str(call_out / "chromosome_stats.tsv"),
             "--bin-stats",
             str(infer_out / "bin_stats.tsv.gz"),
             "--training-loss",

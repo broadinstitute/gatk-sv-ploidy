@@ -122,7 +122,7 @@ def test_assign_and_export_outputs(tmp_path) -> None:
                 "chromosome": "chrX",
                 "copy_number": 2,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.95,
+                "coverage_score": 0.95,
                 "median_depth": 2.0,
                 "sample_overdispersion_map": 0.04,
                 "chr_type": 1,
@@ -132,7 +132,7 @@ def test_assign_and_export_outputs(tmp_path) -> None:
                 "chromosome": "chrY",
                 "copy_number": 0,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.93,
+                "coverage_score": 0.93,
                 "median_depth": 0.0,
                 "sample_overdispersion_map": 0.04,
                 "chr_type": 2,
@@ -142,7 +142,7 @@ def test_assign_and_export_outputs(tmp_path) -> None:
                 "chromosome": "chr21",
                 "copy_number": 2,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.97,
+                "coverage_score": 0.97,
                 "median_depth": 2.0,
                 "sample_overdispersion_map": 0.04,
                 "chr_type": 0,
@@ -152,7 +152,7 @@ def test_assign_and_export_outputs(tmp_path) -> None:
                 "chromosome": "chrX",
                 "copy_number": 1,
                 "is_aneuploid": True,
-                "mean_cn_probability": 0.91,
+                "coverage_score": 0.91,
                 "median_depth": 1.0,
                 "sample_overdispersion_map": 0.09,
                 "chr_type": 1,
@@ -162,7 +162,7 @@ def test_assign_and_export_outputs(tmp_path) -> None:
                 "chromosome": "chrY",
                 "copy_number": 0,
                 "is_aneuploid": True,
-                "mean_cn_probability": 0.92,
+                "coverage_score": 0.92,
                 "median_depth": 0.0,
                 "sample_overdispersion_map": 0.09,
                 "chr_type": 2,
@@ -172,7 +172,7 @@ def test_assign_and_export_outputs(tmp_path) -> None:
                 "chromosome": "chr21",
                 "copy_number": 3,
                 "is_aneuploid": True,
-                "mean_cn_probability": 0.90,
+                "coverage_score": 0.90,
                 "median_depth": 3.0,
                 "sample_overdispersion_map": 0.09,
                 "chr_type": 0,
@@ -206,7 +206,7 @@ def test_assign_falls_back_to_depth_for_low_confidence_allosome_pair() -> None:
                 "chromosome": "chr13",
                 "copy_number": 2,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.95,
+                "coverage_score": 0.95,
                 "median_depth": 2.0,
                 "plot_median_depth": 2.0,
             },
@@ -215,7 +215,7 @@ def test_assign_falls_back_to_depth_for_low_confidence_allosome_pair() -> None:
                 "chromosome": "chr18",
                 "copy_number": 2,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.95,
+                "coverage_score": 0.95,
                 "median_depth": 2.0,
                 "plot_median_depth": 2.0,
             },
@@ -224,7 +224,7 @@ def test_assign_falls_back_to_depth_for_low_confidence_allosome_pair() -> None:
                 "chromosome": "chr21",
                 "copy_number": 2,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.95,
+                "coverage_score": 0.95,
                 "median_depth": 2.0,
                 "plot_median_depth": 2.0,
             },
@@ -233,7 +233,7 @@ def test_assign_falls_back_to_depth_for_low_confidence_allosome_pair() -> None:
                 "chromosome": "chrX",
                 "copy_number": 1,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.46,
+                "coverage_score": 0.46,
                 "median_depth": 2.0,
                 "plot_median_depth": 2.0,
             },
@@ -242,7 +242,7 @@ def test_assign_falls_back_to_depth_for_low_confidence_allosome_pair() -> None:
                 "chromosome": "chrY",
                 "copy_number": 0,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.66,
+                "coverage_score": 0.66,
                 "median_depth": 0.0,
                 "plot_median_depth": 0.0,
             },
@@ -265,7 +265,7 @@ def test_assign_preserves_absolute_cn_labels() -> None:
             "chromosome": chrom,
             "copy_number": copy_number,
             "is_aneuploid": False,
-            "mean_cn_probability": 0.95,
+            "coverage_score": 0.95,
             "median_depth": 1.0,
             "sample_depth_map": 110.0,
         }
@@ -283,7 +283,7 @@ def test_assign_preserves_absolute_cn_labels() -> None:
             "chromosome": chrom,
             "copy_number": copy_number,
             "is_aneuploid": True,
-            "mean_cn_probability": 0.95,
+            "coverage_score": 0.95,
             "median_depth": 1.0,
             "sample_depth_map": 100.0,
         }
@@ -301,7 +301,7 @@ def test_assign_preserves_absolute_cn_labels() -> None:
             "chromosome": chrom,
             "copy_number": copy_number,
             "is_aneuploid": True,
-            "mean_cn_probability": 0.95,
+            "coverage_score": 0.95,
             "median_depth": 1.0,
             "sample_depth_map": 240.0,
         }
@@ -339,7 +339,7 @@ def test_assign_uses_autosomal_baseline_cn_for_triploid_samples() -> None:
                 "chromosome": chrom,
                 "copy_number": copy_number,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.95,
+                "coverage_score": 0.95,
                 "median_depth": 1.0,
                 "sample_depth_map": 150.0,
                 "autosomal_baseline_cn": 3,
@@ -372,7 +372,7 @@ def test_assign_uses_baseline_cn_for_triploid_female_sex_label() -> None:
                 "chromosome": chrom,
                 "copy_number": copy_number,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.95,
+                "coverage_score": 0.95,
                 "median_depth": 1.0,
                 "sample_depth_map": 150.0,
                 "autosomal_baseline_cn": 3,
@@ -401,7 +401,7 @@ def test_assign_separates_triploid_baseline_from_allosomal_aneuploidy() -> None:
                 "chromosome": chrom,
                 "copy_number": copy_number,
                 "is_aneuploid": chrom in {"chrX", "chrY"},
-                "mean_cn_probability": 0.95,
+                "coverage_score": 0.95,
                 "median_depth": 1.0,
                 "sample_depth_map": 150.0,
                 "autosomal_baseline_cn": 3,
@@ -433,7 +433,7 @@ def test_apply_binq_filter_to_chromosome_stats_rebuilds_autosome_calls() -> None
                 "chromosome": "chrX",
                 "copy_number": 2,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.95,
+                "coverage_score": 0.95,
                 "median_depth": 2.0,
                 "n_bins": 1,
             },
@@ -442,7 +442,7 @@ def test_apply_binq_filter_to_chromosome_stats_rebuilds_autosome_calls() -> None
                 "chromosome": "chrY",
                 "copy_number": 0,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.93,
+                "coverage_score": 0.93,
                 "median_depth": 0.0,
                 "n_bins": 1,
             },
@@ -451,7 +451,7 @@ def test_apply_binq_filter_to_chromosome_stats_rebuilds_autosome_calls() -> None
                 "chromosome": "chr21",
                 "copy_number": 3,
                 "is_aneuploid": True,
-                "mean_cn_probability": 0.90,
+                "coverage_score": 0.90,
                 "median_depth": 3.0,
                 "n_bins": 2,
             },
@@ -531,7 +531,7 @@ def test_apply_binq_filter_handles_fully_filtered_run() -> None:
                 "chromosome": "chrX",
                 "copy_number": 2,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.95,
+                "coverage_score": 0.95,
                 "median_depth": 2.0,
                 "n_bins": 1,
             },
@@ -540,7 +540,7 @@ def test_apply_binq_filter_handles_fully_filtered_run() -> None:
                 "chromosome": "chr21",
                 "copy_number": 3,
                 "is_aneuploid": True,
-                "mean_cn_probability": 0.90,
+                "coverage_score": 0.90,
                 "median_depth": 3.0,
                 "n_bins": 2,
             },
@@ -600,7 +600,7 @@ def test_apply_binq_filter_handles_fully_filtered_run() -> None:
     chrX = filtered[filtered["chromosome"] == "chrX"].iloc[0]
 
     assert int(chr21["copy_number"]) == 2
-    assert pd.isna(chr21["mean_cn_probability"])
+    assert pd.isna(chr21["coverage_score"])
     assert int(chr21["n_bins_retained"]) == 0
     assert float(chr21["frac_bins_retained"]) == 0.0
     assert bool(chr21["is_aneuploid"]) is False
@@ -616,7 +616,7 @@ def test_apply_binq_filter_uses_majority_vote_and_average_cnq() -> None:
                 "chromosome": "chr21",
                 "copy_number": 2,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.75,
+                "coverage_score": 0.75,
                 "median_depth": 2.5,
                 "n_bins": 3,
             },
@@ -690,7 +690,7 @@ def test_apply_binq_filter_uses_majority_vote_and_average_cnq() -> None:
 
     row = filtered.iloc[0]
     assert int(row["copy_number"]) == 3
-    assert float(row["mean_cn_probability"]) == pytest.approx(2.0 / 3.0)
+    assert float(row["coverage_score"]) == pytest.approx(2.0 / 3.0)
     assert int(row["plq"]) == 30
     assert bool(row["is_aneuploid"]) is True
 
@@ -703,7 +703,7 @@ def test_apply_binq_filter_preserves_original_sex_call_on_conflicting_subset() -
                 "chromosome": "chrX",
                 "copy_number": 1,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.96,
+                "coverage_score": 0.96,
                 "median_depth": 1.0,
                 "n_bins": 3,
             },
@@ -712,7 +712,7 @@ def test_apply_binq_filter_preserves_original_sex_call_on_conflicting_subset() -
                 "chromosome": "chrY",
                 "copy_number": 1,
                 "is_aneuploid": False,
-                "mean_cn_probability": 0.53,
+                "coverage_score": 0.53,
                 "median_depth": 1.0,
                 "n_bins": 10,
             },
@@ -760,7 +760,7 @@ def test_apply_binq_filter_preserves_original_sex_call_on_conflicting_subset() -
     chr_y = filtered[filtered["chromosome"] == "chrY"].iloc[0]
 
     assert int(chr_y["copy_number"]) == 1
-    assert float(chr_y["mean_cn_probability"]) == pytest.approx(0.53)
+    assert float(chr_y["coverage_score"]) == pytest.approx(0.53)
     assert int(chr_y["n_bins_retained"]) == 9
     assert float(chr_y["frac_bins_retained"]) == pytest.approx(0.9)
     assert bool(chr_y["is_aneuploid"]) is False
@@ -774,7 +774,7 @@ def test_apply_binq_filter_auto_uses_binq20_when_available() -> None:
                 "chromosome": "chr21",
                 "copy_number": 3,
                 "is_aneuploid": True,
-                "mean_cn_probability": 0.90,
+                "coverage_score": 0.90,
                 "median_depth": 3.0,
                 "n_bins": 2,
             },
@@ -841,7 +841,7 @@ def test_apply_binq_filter_explicit_callq20_uses_call_quality() -> None:
                 "chromosome": "chr21",
                 "copy_number": 3,
                 "is_aneuploid": True,
-                "mean_cn_probability": 0.90,
+                "coverage_score": 0.90,
                 "median_depth": 3.0,
                 "n_bins": 2,
             },

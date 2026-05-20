@@ -480,11 +480,11 @@ def _prepare_chromosome_cn_heatmap_data(
     )
     cn_pivot = cn_pivot.reindex(columns=chr_order)
 
-    if "mean_cn_probability" in plot_df.columns:
+    if "coverage_score" in plot_df.columns:
         prob_pivot = plot_df.pivot(
             index="sample",
             columns="chromosome",
-            values="mean_cn_probability",
+            values="coverage_score",
         )
         prob_pivot = prob_pivot.reindex(columns=chr_order)
     else:
@@ -1111,7 +1111,7 @@ def _run_aneuploidy_plots(
             continue
         sdf = df[df["sample"] == sid]
         aneu_chrs = [
-            (r["chromosome"], r["copy_number"], r["mean_cn_probability"])
+            (r["chromosome"], r["copy_number"], r["coverage_score"])
             for _, r in sdf[sdf["is_aneuploid"]].iterrows()
         ]
         metadata = baseline_metadata.get(
@@ -1193,7 +1193,7 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("-c", "--chrom-stats", required=True,
-                   help="chromosome_stats.tsv (from 'infer')")
+                   help="called chromosome_stats.tsv (from 'call')")
     p.add_argument("-o", "--output-dir", required=True)
     p.add_argument("-b", "--bin-stats", default=None,
                    help="bin_stats.tsv.gz (from 'infer')")

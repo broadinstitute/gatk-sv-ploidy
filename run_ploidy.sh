@@ -189,6 +189,7 @@ PREPROCESSED_DEPTH="${PREPROCESS_DIR}/preprocessed_depth.tsv"
 SITE_DATA="${PREPROCESS_DIR}/site_data.npz"
 POLYPLOIDY_MANIFEST="${POLYPLOIDY_DIR}/sample_autosomal_baseline_cn.tsv"
 CHROM_STATS="${INFER_DIR}/chromosome_stats.tsv"
+CALLED_CHROM_STATS="${CALL_DIR}/chromosome_stats.tsv"
 BIN_STATS="${INFER_DIR}/bin_stats.tsv.gz"
 TRAINING_LOSS="${INFER_DIR}/training_loss.tsv"
 INFERENCE_ARTIFACTS="${INFER_DIR}/inference_artifacts.npz"
@@ -231,25 +232,25 @@ if [[ "${CALL_NEEDS_PPD_FILTER}" == "true" ]]; then
 fi
 
 # ── preprocess ─────────────────────────
-echo "preprocess"
-SD_ARGS=""
-if [[ -n "${SITE_DEPTH_LIST}" ]]; then
-    SD_ARGS="--site-depth-list ${SITE_DEPTH_LIST}"
-fi
-PR_ARGS=""
-if [[ -n "${POOR_REGIONS}" ]]; then
-    PR_ARGS="--poor-regions ${POOR_REGIONS}"
-fi
-if [[ "${DRY_RUN}" == "true" ]]; then
-    dry_run_step "preprocess"
-else
-    run_cli preprocess \
-        -i "${INPUT_DEPTH}" \
-        -o "${PREPROCESS_DIR}" \
-        $SD_ARGS \
-        $PR_ARGS \
-        $PREPROCESS_ARGS
-fi
+# echo "preprocess"
+# SD_ARGS=""
+# if [[ -n "${SITE_DEPTH_LIST}" ]]; then
+#     SD_ARGS="--site-depth-list ${SITE_DEPTH_LIST}"
+# fi
+# PR_ARGS=""
+# if [[ -n "${POOR_REGIONS}" ]]; then
+#     PR_ARGS="--poor-regions ${POOR_REGIONS}"
+# fi
+# if [[ "${DRY_RUN}" == "true" ]]; then
+#     dry_run_step "preprocess"
+# else
+#     run_cli preprocess \
+#         -i "${INPUT_DEPTH}" \
+#         -o "${PREPROCESS_DIR}" \
+#         $SD_ARGS \
+#         $PR_ARGS \
+#         $PREPROCESS_ARGS
+# fi
 
 RUN_POLYPLOIDY="false"
 if [[ -f "${SITE_DATA}" ]]; then
@@ -359,13 +360,10 @@ fi
 if [[ "${USE_CALLQ20}" == "true" && -n "${PLOT_BINQ_ARGS}" ]]; then
     PLOT_BINQ_ARGS="${PLOT_BINQ_ARGS} --binq-field CALLQ20"
 fi
-PLOT_CHROM_STATS="${CHROM_STATS}"
+PLOT_CHROM_STATS="${CALLED_CHROM_STATS}"
 PLOT_IGNORED_ARGS=""
 if [[ "${CALL_NEEDS_PPD_FILTER}" == "true" ]]; then
-    PLOT_CHROM_STATS="${CALL_DIR}/chromosome_stats.filtered.tsv"
     PLOT_IGNORED_ARGS="--ignored-bins ${IGNORED_BINS}"
-elif [[ -f "${CALL_DIR}/chromosome_stats.filtered.tsv" ]]; then
-    PLOT_CHROM_STATS="${CALL_DIR}/chromosome_stats.filtered.tsv"
 fi
 if [[ -f "${IGNORED_BINS}" ]]; then
     PLOT_IGNORED_ARGS="--ignored-bins ${IGNORED_BINS}"

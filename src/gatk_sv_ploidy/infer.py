@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,7 +23,6 @@ from gatk_sv_ploidy._util import (
     compose_additive_background_matrix,
     DEFAULT_AF_WEIGHT,
     compute_cnq_from_probabilities,
-    is_expected_allosome_copy_number_pair,
     format_count_summary,
     format_numeric_summary,
     get_sample_columns,
@@ -1943,92 +1942,6 @@ def _get_chr_info(
     return best_cn, best_prob, n_bins, ploidy_fractions, plq
 
 
-def detect_aneuploidies(
-    data: DepthData,
-    cn_posterior: Dict[str, np.ndarray],
-    prob_threshold: float = 0.5,
-    autosomal_baseline_cn: np.ndarray | None = None,
-) -> Dict[int, List[Tuple[str, int, float]]]:
-    """Detect per-chromosome aneuploidies for every sample.
-
-    Args:
-        data: :class:`DepthData` used for inference.
-        cn_posterior: Posterior from :meth:`CNVModel.run_discrete_inference`.
-        prob_threshold: Minimum mean CN probability to call an aneuploidy.
-
-    Returns:
-        Dictionary mapping sample index → list of
-        ``(chr_name, cn_state, mean_prob)`` tuples for aneuploid chromosomes.
-    """
-    cn_probs = cn_posterior["cn_posterior"]
-    unique_chrs = np.unique(data.chr)
-    if autosomal_baseline_cn is None:
-        autosomal_baseline_cn = np.full(data.n_samples, 2, dtype=np.int64)
-    autosomal_baseline_cn = np.asarray(
-        autosomal_baseline_cn,
-        dtype=np.int64,
-    ).reshape(-1)
-    if autosomal_baseline_cn.shape[0] != data.n_samples:
-        raise ValueError(
-            "autosomal_baseline_cn must provide one baseline copy number per sample."
-        )
-
-    sex_chrs = {"chrX", "chrY"}
-    autosomes = [c for c in unique_chrs if c not in sex_chrs]
-
-    aneuploid: Dict[int, List[Tuple[str, int, float]]] = {
-        i: [] for i in range(data.n_samples)
-    }
-
-    # Autosomes: aneuploidy when CN ≠ 2 and high confidence
-    for chr_name in autosomes:
-        for si in range(data.n_samples):
-            best_cn, mean_prob, _, _, _ = _get_chr_info(
-                data,
-                cn_probs,
-                chr_name,
-                si,
-            )
-            if best_cn != int(autosomal_baseline_cn[si]) and mean_prob > prob_threshold:
-                aneuploid[si].append((chr_name, best_cn, mean_prob))
-
-    # Sex chromosomes: aneuploidy when the X/Y pair is not consistent with
-    # the sample's autosomal baseline CN.
-    for si in range(data.n_samples):
-        x_cn, x_prob, x_bins, _, _ = _get_chr_info(
-            data,
-            cn_probs,
-            "chrX",
-            si,
-        )
-        y_cn, y_prob, y_bins, _, _ = _get_chr_info(
-            data,
-            cn_probs,
-            "chrY",
-            si,
-        )
-
-        if x_cn is None and y_cn is None:
-            continue
-
-        x_ok = x_prob > prob_threshold if x_bins > 0 else True
-        y_ok = y_prob > prob_threshold if y_bins > 0 else True
-        baseline_cn = int(autosomal_baseline_cn[si])
-        is_expected_sex_pair = is_expected_allosome_copy_number_pair(
-            x_cn,
-            y_cn,
-            baseline_cn,
-        )
-
-        if not is_expected_sex_pair and x_ok and y_ok:
-            if x_bins > 0:
-                aneuploid[si].append(("chrX", x_cn, x_prob))
-            if y_bins > 0:
-                aneuploid[si].append(("chrY", y_cn, y_prob))
-
-    return aneuploid
-
-
 # ── result assembly ─────────────────────────────────────────────────────────
 
 
@@ -2174,7 +2087,6 @@ def build_chromosome_stats(
     data: DepthData,
     map_estimates: Dict[str, np.ndarray],
     cn_posterior: Dict[str, np.ndarray],
-    aneuploid_map: Dict[int, List[Tuple[str, int, float]]],
     af_table: Optional[np.ndarray] = None,
     min_het_alt: int = 3,
     min_het_af: float = 0.2,
@@ -2186,7 +2098,6 @@ def build_chromosome_stats(
         data: :class:`DepthData` instance.
         map_estimates: MAP estimates dict.
         cn_posterior: Discrete posterior dict.
-        aneuploid_map: Output of :func:`detect_aneuploidies`.
         af_table: Optional precomputed AF log-likelihood table of shape
             ``(n_states, n_bins, n_samples)``.
         min_het_alt: Minimum alt-allele read count to call a site heterozygous.
@@ -2229,7 +2140,6 @@ def build_chromosome_stats(
     ).reshape(-1)
 
     for si in range(data.n_samples):
-        aneu_set = {c for c, _, _ in aneuploid_map.get(si, [])}
         for chr_name in unique_chrs:
             mask = data.chr == chr_name
             n_bins = int(mask.sum())
@@ -2237,7 +2147,7 @@ def build_chromosome_stats(
                 continue
 
             chr_cn_map = np.argmax(cn_probs[mask, si, :], axis=1)
-            best_cn, mean_prob, ploidy_fractions, plq = summarize_contig_ploidy_from_bin_calls(
+            best_cn, coverage_score, ploidy_fractions, plq = summarize_contig_ploidy_from_bin_calls(
                 chr_cn_map,
                 cnq[mask, si],
                 n_states=n_states,
@@ -2248,9 +2158,8 @@ def build_chromosome_stats(
                 "sample": data.sample_ids[si],
                 "chromosome": chr_name,
                 "copy_number": best_cn,
-                "mean_cn_probability": mean_prob,
+                "coverage_score": coverage_score,
                 "plq": plq,
-                "is_aneuploid": chr_name in aneu_set,
                 "n_bins": n_bins,
                 "mean_depth": float(np.mean(depths)),
                 "std_depth": float(np.std(depths)),
@@ -2586,12 +2495,6 @@ def parse_args() -> argparse.Namespace:
     )
 
     discrete = p.add_argument_group("discrete inference")
-    discrete.add_argument(
-        "--prob-threshold",
-        type=float,
-        default=0.5,
-        help="Min mean CN probability for aneuploidy call",
-    )
     discrete.add_argument(
         "--cn-inference-method",
         choices=["single", "median", "multi-draw"],
@@ -3010,14 +2913,6 @@ def _run_infer(args: argparse.Namespace, logger) -> None:
     baseline_df.to_csv(baseline_path, sep="\t", index=False)
     output_artifacts.append(baseline_path)
 
-    # ── detect aneuploidies ─────────────────────────────────────────────
-    aneuploid_map = detect_aneuploidies(
-        data,
-        cn_post,
-        prob_threshold=args.prob_threshold,
-        autosomal_baseline_cn=autosomal_baseline_cn,
-    )
-
     # ── write bin stats ─────────────────────────────────────────────────
     bin_df = build_bin_stats(
         data, map_est, cn_post,
@@ -3032,7 +2927,7 @@ def _run_infer(args: argparse.Namespace, logger) -> None:
 
     # ── write chromosome stats ──────────────────────────────────────────
     chr_df = build_chromosome_stats(
-        data, map_est, cn_post, aneuploid_map,
+        data, map_est, cn_post,
         af_table=af_table_np,
         min_het_alt=args.min_het_alt,
         min_het_af=args.min_het_af,

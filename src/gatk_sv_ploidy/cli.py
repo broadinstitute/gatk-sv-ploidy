@@ -2,7 +2,7 @@
 CLI entry point for gatk-sv-ploidy.
 
 Dispatches to subcommands: preprocess, polyploidy, infer, ppd, call,
-plot, eval, pull-snps.
+plot, aggregate, eval, pull-snps.
 """
 
 import sys
@@ -15,6 +15,7 @@ SUBCOMMANDS = {
     "ppd": "gatk_sv_ploidy.ppd",
     "call": "gatk_sv_ploidy.call",
     "plot": "gatk_sv_ploidy.plot",
+    "aggregate": "gatk_sv_ploidy.aggregate",
     "eval": "gatk_sv_ploidy.eval",
     "pull-snps": "gatk_sv_ploidy.pull_snps",
 }
@@ -26,6 +27,7 @@ DESCRIPTIONS = {
     "ppd": "Posterior predictive check: compare model predictions to data",
     "call": "Assign sex karyotype and aneuploidy type per sample",
     "plot": "Generate diagnostic and summary plots",
+    "aggregate": "Aggregate one or more ploidy runs into a PDF report",
     "eval": "Evaluate predictions against a truth set",
     "pull-snps": "Pull common-SNP sites from gnomAD (requires hail; local only)",
 }

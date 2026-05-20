@@ -15,6 +15,7 @@ def test_print_usage_mentions_subcommands(capsys) -> None:
     assert "Whole-genome aneuploidy detection" in captured.out
     assert "preprocess" in captured.out
     assert "infer" in captured.out
+    assert "aggregate" in captured.out
     assert "pull-snps" in captured.out
 
 
@@ -69,13 +70,13 @@ def test_main_dispatches_to_subcommand(monkeypatch) -> None:
         called["module_name"] = name
         return types.SimpleNamespace(main=fake_main)
 
-    monkeypatch.setattr(cli.sys, "argv", ["gatk-sv-ploidy", "infer", "--input", "x"])
+    monkeypatch.setattr(cli.sys, "argv", ["gatk-sv-ploidy", "aggregate", "run1"])
     monkeypatch.setattr("importlib.import_module", fake_import)
 
     cli.main()
 
     assert called == {
-        "module_name": "gatk_sv_ploidy.infer",
+        "module_name": "gatk_sv_ploidy.aggregate",
         "main_called": True,
     }
-    assert cli.sys.argv == ["gatk-sv-ploidy infer", "--input", "x"]
+    assert cli.sys.argv == ["gatk-sv-ploidy aggregate", "run1"]

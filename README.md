@@ -51,6 +51,7 @@ gatk-sv-ploidy <subcommand> [options]
 | `ppd` | Generate posterior predictive draws and quality / calibration summaries |
 | `call` | Assign baseline-aware sex and aneuploidy labels per sample |
 | `plot` | Generate diagnostic plots and a static HTML report |
+| `aggregate` | Combine one or more wrapper work directories into one PDF review report |
 | `eval` | Evaluate predictions against a truth set |
 | `pull-snps` | Pull common-SNP sites from gnomAD (requires Hail; local only) |
 
@@ -112,6 +113,10 @@ gatk-sv-ploidy plot -c out/call/chromosome_stats.filtered.tsv \
 gatk-sv-ploidy eval -p out/call/aneuploidy_type_predictions.tsv \
   -t truth.json \
   -o out/eval
+
+# 8. Aggregate one or more wrapper work directories into a single PDF report.
+gatk-sv-ploidy aggregate cohort_a_work_dir cohort_b_work_dir \
+  -o aggregate_report
 ```
 
 If all samples are expected to be diploid, or if no `site_data.npz` is
@@ -132,8 +137,8 @@ and runs `ppd` only when `--ppd` is supplied.
 
 Each subcommand writes ISO-timestamped diagnostics to the terminal on `stderr`
 and to a text log in its output directory: `preprocess.log`,
-`polyploidy.log`, `infer.log`, `ppd.log`, `call.log`, `plot.log`, or
-`eval.log`. The local-only `pull-snps` helper writes `pull-snps.log` next to
+`polyploidy.log`, `infer.log`, `ppd.log`, `call.log`, `plot.log`,
+`aggregate.log`, or `eval.log`. The local-only `pull-snps` helper writes `pull-snps.log` next to
 its output VCF.
 
 Logs are privacy-safe by default. They record aggregate run metadata,
@@ -152,6 +157,7 @@ the log. Machine-readable output files remain separate from diagnostics.
 | `ppd` | `ppd.log`, `ppd_draws.npz`, `ppd_bin_summary.tsv.gz`, `ppd_bin_quality.tsv`, `ppd_chromosome_summary.tsv`, `ppd_global_summary.tsv` |
 | `call` | `call.log`, `sex_assignments.txt.gz`, `aneuploidy_type_predictions.tsv`, `aneuploid_samples.tsv`, optional `chromosome_stats.filtered.tsv` and `ignored_bins.tsv.gz` when BINQ filtering is used |
 | `plot` | `plot.log`, `plot_manifest.tsv`, `report/index.html`, linked plot and table artifacts |
+| `aggregate` | `aggregate.log`, `aggregate_report.pdf`, `aggregate_summary.tsv`, `aggregate_cases.tsv`, `aggregate_contig_events.tsv`, `aggregate_missing_artifacts.tsv` |
 | `eval` | `eval.log`, `metrics_report.txt`, `predictions_with_truth.tsv` |
 
 ### Plot Report
@@ -174,6 +180,41 @@ mode.
 
 If you use the end-to-end wrapper, pass plot options via
 `run_ploidy.sh --plot-args "--pdf"`.
+
+### Aggregate Report
+
+`aggregate` ingests one or more work directories produced by `run_ploidy.sh`.
+Each input directory is treated as one batch by default, using the directory
+name as the batch label. Use repeated `--batch-label` arguments to override
+those labels, one per input directory.
+
+```bash
+gatk-sv-ploidy aggregate batch_001 batch_002 batch_003 \
+  -o review \
+  --batch-label A --batch-label B --batch-label C
+```
+
+The tool reads sample-level calls from `call/aneuploidy_type_predictions.tsv`
+and chromosome-level metrics from `call/chromosome_stats.filtered.tsv` when
+available, otherwise `infer/chromosome_stats.tsv`. Optional artifacts such as
+`infer/bin_stats.tsv.gz`, `preprocess/site_data.npz`,
+`polyploidy/sample_autosomal_baseline_cn.tsv`, `call/ignored_bins.tsv.gz`, and
+`ppd/ppd_bin_quality.tsv` are used when present and recorded as missing when
+absent.
+
+The PDF contains a run/provenance summary, summary counts, a case index, and
+sample-focused sections for confident sex aneuploidies, confident polyploidy,
+confident autosomal aneuploidy, and low-confidence aneuploidies. A
+low-confidence aneuploidy is a contig whose copy number differs from the
+expected baseline but whose `mean_cn_probability` is at or below
+`--prob-threshold` (default 0.5), excluding contigs already marked as confident
+aneuploidies.
+
+The report includes review metrics for each case: anomalous contigs, copy
+number, expected copy number, `mean_cn_probability`, PLQ, sample score, sample
+depth ratio and batch percentile, sample overdispersion and batch percentile,
+retained-bin fraction when available, truth labels when present, and optional
+sample diagnostic plots when per-bin statistics are available.
 
 ## Pipeline Architecture
 

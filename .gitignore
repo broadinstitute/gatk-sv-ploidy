@@ -16,4 +16,6 @@ pip-wheel-metadata/
 
 *.log
 
+scratch/
+
 .idea/
